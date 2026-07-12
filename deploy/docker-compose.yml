@@ -1,0 +1,77 @@
+# Single-host stack for Phase 1: graph DB, run metadata DB, control-plane API, and the web UI.
+services:
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: neo4j/eye-dev-password
+    ports:
+      - "7474:7474"   # browser
+      - "7687:7687"   # bolt
+    volumes:
+      - neo4j-data:/data
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: eye
+      POSTGRES_PASSWORD: eye
+      POSTGRES_DB: eye
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/api.Dockerfile
+    environment:
+      EYE_NEO4J_URI: bolt://neo4j:7687
+      EYE_NEO4J_PASSWORD: eye-dev-password
+      EYE_POSTGRES_DSN: postgresql://eye:eye@postgres:5432/eye
+      # Override in any real deployment; the scope guard's signatures depend on it.
+      EYE_SCOPE_SIGNING_KEY: dev-insecure-signing-key
+    ports:
+      - "9000:9000"
+    depends_on:
+      - neo4j
+      - postgres
+    # The API launches disposable sandbox containers on the host's Docker daemon.
+    # This socket mount is a known Phase 1 trade-off; Phase 6 replaces it with a brokered,
+    # rootless runner so the API never holds full daemon access.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # Scan worker: drains the durable job queue. Scale with `docker compose up --scale worker=N`.
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/api.Dockerfile
+    command: ["python", "-m", "app.worker"]
+    environment:
+      EYE_NEO4J_URI: bolt://neo4j:7687
+      EYE_NEO4J_PASSWORD: eye-dev-password
+      EYE_POSTGRES_DSN: postgresql://eye:eye@postgres:5432/eye
+      EYE_SCOPE_SIGNING_KEY: dev-insecure-signing-key
+    depends_on:
+      - neo4j
+      - postgres
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  web:
+    build:
+      context: ../web
+      dockerfile: ../deploy/web.Dockerfile
+      args:
+        # Baked into the client bundle at build time. Point at a reachable API address —
+        # for LAN/Tailscale access this must be the host's IP, not localhost.
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:9000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  neo4j-data:
+  pg-data:

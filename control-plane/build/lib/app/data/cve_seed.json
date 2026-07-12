@@ -1,0 +1,20 @@
+[
+  {"cve_id": "CVE-2021-44228", "product": "log4j", "version": "2.0-2.14.1", "cvss_score": 10.0,
+   "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", "cwe": "CWE-502",
+   "description": "Log4Shell: JNDI lookup remote code execution.", "published": "2021-12-10"},
+  {"cve_id": "CVE-2014-0160", "product": "openssl", "version": "1.0.1-1.0.1f", "cvss_score": 7.5,
+   "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "cwe": "CWE-125",
+   "description": "Heartbleed: TLS heartbeat memory disclosure.", "published": "2014-04-07"},
+  {"cve_id": "CVE-2017-5638", "product": "apache struts", "version": "2.3-2.5.10", "cvss_score": 9.8,
+   "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "cwe": "CWE-20",
+   "description": "Struts2 Content-Type OGNL remote code execution.", "published": "2017-03-10"},
+  {"cve_id": "CVE-2019-0708", "product": "windows rdp", "version": "", "cvss_score": 9.8,
+   "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "cwe": "CWE-416",
+   "description": "BlueKeep: pre-auth RDP remote code execution.", "published": "2019-05-14"},
+  {"cve_id": "CVE-2021-41773", "product": "apache httpd", "version": "2.4.49", "cvss_score": 7.5,
+   "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "cwe": "CWE-22",
+   "description": "Path traversal and file disclosure in Apache 2.4.49.", "published": "2021-10-05"},
+  {"cve_id": "CVE-2018-15473", "product": "openssh", "version": "<7.7", "cvss_score": 5.3,
+   "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "cwe": "CWE-200",
+   "description": "OpenSSH username enumeration via timing.", "published": "2018-08-17"}
+]

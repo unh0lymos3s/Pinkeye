@@ -1,0 +1,25 @@
+[project]
+name = "eye-agent-runtime"
+version = "0.1.0"
+description = "Codename Eye agent runtime: sandboxed security tools, normalizers, orchestrator."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "docker>=7.0",
+    # Shares scope guard, models, audit, and graph client with the control plane.
+    "eye-control-plane",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["runtime*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

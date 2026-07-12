@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Node / Next
+node_modules/
+.next/
+web/next-env.d.ts
+
+# Local env
+.env
