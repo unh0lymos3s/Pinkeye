@@ -5,13 +5,14 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { Graph } from "../lib/api";
 
+// Kept in sync with the --node-* tokens in globals.css (SVG fill attributes can't read CSS vars).
 const COLORS: Record<string, string> = {
-  Engagement: "#8b5cf6",
-  IP: "#3b82f6",
-  Port: "#22c55e",
-  Service: "#eab308",
-  Finding: "#ef4444",
-  Node: "#94a3b8",
+  Engagement: "#34e57a",
+  IP: "#38bdf8",
+  Port: "#a3e635",
+  Service: "#ffb020",
+  Finding: "#ff4d6d",
+  Node: "#7fb488",
 };
 
 const W = 960;
@@ -31,9 +32,9 @@ type P = {
 
 // Ring color for a node's cross-run memory status; null = no status ring.
 const STATUS_COLOR: Record<string, string> = {
-  new: "#22c55e",
-  changed: "#f59e0b",
-  gone: "#64748b",
+  new: "#34e57a",
+  changed: "#ffb020",
+  gone: "#5f7a66",
 };
 
 function nodeTitle(props: Record<string, unknown>): string {
@@ -177,7 +178,7 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
       onDoubleClick={resetView}
       style={{
         display: "block",
-        background: "radial-gradient(circle at 50% 40%, #141a26, #0e121b)",
+        background: "radial-gradient(circle at 50% 40%, #0a140c, #030603)",
         borderRadius: 8,
         cursor: panning ? "grabbing" : "grab",
         touchAction: "none",
@@ -192,7 +193,7 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
           <line
             key={i}
             x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-            stroke={active ? "#64748b" : "#2a3546"}
+            stroke={active ? "#4f7256" : "#1e3322"}
             strokeWidth={active ? 1.6 : 1}
           />
         );
@@ -216,7 +217,7 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
             {active && <circle cx={n.x} cy={n.y} r={r + 5} fill={color} opacity={0.18} />}
             {/* Exploitable ring: an amber halo flags a proven-exploitable service/endpoint or target device. */}
             {n.exploitable && (
-              <circle cx={n.x} cy={n.y} r={r + 4} fill="none" stroke="#f59e0b" strokeWidth={2} opacity={0.95} />
+              <circle cx={n.x} cy={n.y} r={r + 4} fill="none" stroke="#ffb020" strokeWidth={2} opacity={0.95} />
             )}
             {/* Cross-run status ring: new / changed / gone from the memory engine. */}
             {statusColor && (
@@ -231,13 +232,19 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
                 opacity={0.9}
               />
             )}
-            <circle cx={n.x} cy={n.y} r={r} fill={color} stroke="#0e121b" strokeWidth={1.5} />
+            <circle cx={n.x} cy={n.y} r={r} fill={color} stroke="#030603" strokeWidth={1.5} />
             {n.exploitable && (
-              <text x={n.x} y={n.y + 3.5} fontSize={9} textAnchor="middle" fill="#0e121b" fontWeight={700}>
+              <text x={n.x} y={n.y + 3.5} fontSize={9} textAnchor="middle" fill="#030603" fontWeight={700}>
                 !
               </text>
             )}
-            <text x={n.x + r + 6} y={n.y + 4} fontSize={11} fill={active ? "#e8eaf0" : "#9aa5b8"}>
+            <text
+              x={n.x + r + 6}
+              y={n.y + 4}
+              fontSize={11}
+              fill={active ? "#d4f2d8" : "#7fb488"}
+              style={{ fontFamily: "var(--mono)" }}
+            >
               {n.title}
             </text>
             <title>{tip}</title>

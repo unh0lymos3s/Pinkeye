@@ -3,50 +3,51 @@
    classes the pages compose. Pages should reach for these classes before inline styles. */
 
 :root {
-  /* Surfaces (dark, layered) */
-  --bg: #0a0d13;
-  --surface: #10141d;
-  --surface-2: #161b26;
-  --surface-3: #1c2230;
-  --border: #232b3a;
-  --border-strong: #33405a;
+  /* Surfaces (near-black, faint green cast, layered) */
+  --bg: #030603;
+  --surface: #080b08;
+  --surface-2: #0c110c;
+  --surface-3: #121a13;
+  --border: #1b2a1d;
+  --border-strong: #2b4530;
 
-  /* Text */
-  --text: #e8eaf0;
-  --text-muted: #9aa5b8;
-  --text-dim: #64748b;
+  /* Text (phosphor greens on black) */
+  --text: #d4f2d8;
+  --text-muted: #7fb488;
+  --text-dim: #4f7256;
 
-  /* Brand */
-  --brand: #8b5cf6;
-  --brand-2: #6366f1;
-  --brand-soft: rgba(139, 92, 246, 0.14);
-  --brand-ring: rgba(139, 92, 246, 0.5);
+  /* Brand (terminal green) */
+  --brand: #34e57a;
+  --brand-2: #16a34a;
+  --brand-soft: rgba(52, 229, 122, 0.14);
+  --brand-ring: rgba(52, 229, 122, 0.5);
 
   /* Severity / status */
-  --critical: #f43f5e;
-  --high: #ef4444;
-  --medium: #f59e0b;
-  --low: #3b82f6;
-  --info: #64748b;
-  --ok: #22c55e;
+  --critical: #ff4d6d;
+  --high: #ff6b5e;
+  --medium: #ffb020;
+  --low: #38bdf8;
+  --info: #6f8f77;
+  --ok: #34e57a;
   --warn: #eab308;
 
-  /* Graph entity colors */
-  --node-engagement: #8b5cf6;
-  --node-ip: #3b82f6;
-  --node-port: #22c55e;
-  --node-service: #eab308;
-  --node-finding: #ef4444;
-  --node-default: #94a3b8;
+  /* Graph entity colors — distinct hues that stay cohesive on black */
+  --node-engagement: #34e57a;
+  --node-ip: #38bdf8;
+  --node-port: #a3e635;
+  --node-service: #ffb020;
+  --node-finding: #ff4d6d;
+  --node-default: #7fb488;
 
   --radius: 10px;
   --radius-sm: 7px;
   --radius-lg: 16px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.28);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
 
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  /* Monospaced everywhere for the terminal aesthetic. */
+  --font: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -55,8 +56,8 @@ html, body { padding: 0; margin: 0; }
 
 body {
   background:
-    radial-gradient(900px 500px at 15% -10%, rgba(139, 92, 246, 0.10), transparent 60%),
-    radial-gradient(800px 500px at 100% 0%, rgba(99, 102, 241, 0.08), transparent 55%),
+    radial-gradient(900px 500px at 15% -10%, rgba(52, 229, 122, 0.08), transparent 60%),
+    radial-gradient(800px 500px at 100% 0%, rgba(22, 163, 74, 0.07), transparent 55%),
     var(--bg);
   color: var(--text);
   font-family: var(--font);
@@ -68,10 +69,25 @@ body {
 
 a { color: inherit; }
 
-h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
-h1 { font-size: 24px; }
-h2 { font-size: 18px; }
+/* Mono fonts render wider, so tighten headings less than a proportional face would. */
+h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -0.005em; }
+h1 { font-size: 23px; }
+h2 { font-size: 17px; }
 h3 { font-size: 15px; }
+
+/* Theme the native form controls so checkboxes, radios and select carets read green
+   instead of the OS default blue/grey on a black surface. */
+input, select, textarea, button { accent-color: var(--brand); }
+
+/* Text selection picks up the phosphor green. */
+::selection { background: rgba(52, 229, 122, 0.28); color: var(--text); }
+
+/* Slim, green-tinted scrollbars to match the terminal look. */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--brand-2); background-clip: padding-box; }
 
 /* ---- Layout ---- */
 .page { max-width: 1160px; margin: 0 auto; padding: 28px 24px 72px; }
@@ -92,7 +108,7 @@ h3 { font-size: 15px; }
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; gap: 4px;
   padding: 10px 20px;
-  background: rgba(12, 15, 22, 0.82);
+  background: rgba(4, 7, 4, 0.82);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
 }
@@ -100,8 +116,8 @@ h3 { font-size: 15px; }
 .brand .eye {
   width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center;
   background: linear-gradient(135deg, var(--brand), var(--brand-2));
-  box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 4px 12px rgba(139,92,246,0.4);
-  font-size: 13px;
+  box-shadow: 0 0 0 1px rgba(52, 229, 122, 0.25), 0 0 14px rgba(52, 229, 122, 0.45);
+  color: #041007; font-size: 13px;
 }
 .brand .name { font-size: 14.5px; letter-spacing: -0.01em; }
 .nav-link {
@@ -157,8 +173,8 @@ h3 { font-size: 15px; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-primary {
   background: linear-gradient(135deg, var(--brand), var(--brand-2));
-  border-color: transparent; color: white;
-  box-shadow: 0 2px 10px rgba(139, 92, 246, 0.35);
+  border-color: transparent; color: #041007; font-weight: 650;
+  box-shadow: 0 0 14px rgba(52, 229, 122, 0.3);
 }
 .btn-primary:hover { filter: brightness(1.08); }
 .btn-ghost { background: transparent; }
@@ -273,7 +289,7 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 .chat .msg.done-line { text-align: center; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; padding: 8px 0; }
 .chat .msg.finding { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--surface-3); }
 .chat .msg.finding .title { color: var(--text); font-weight: 500; }
-.chat .msg.change { background: rgba(139,92,246,0.07); border-color: var(--brand-ring); }
+.chat .msg.change { background: rgba(52, 229, 122, 0.07); border-color: var(--brand-ring); }
 .chat .msg.change .who { color: var(--brand); }
 .chat .msg.sys.refusal { border: 1px solid rgba(234,179,8,0.4); background: rgba(234,179,8,0.07); padding: 8px 11px; border-radius: var(--radius-sm); font-family: inherit; }
 .chat .msg.sys.refusal .who { color: var(--warn); }

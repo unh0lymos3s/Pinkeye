@@ -247,10 +247,10 @@ export default function Home() {
           ))}
           {/* Cross-run memory badges rendered as rings by GraphView. */}
           {[
-            ["⚠ exploitable", "#f59e0b"],
-            ["new", "#22c55e"],
-            ["changed", "#f59e0b"],
-            ["gone", "#64748b"],
+            ["⚠ exploitable", "#ffb020"],
+            ["new", "#34e57a"],
+            ["changed", "#ffb020"],
+            ["gone", "#5f7a66"],
           ].map(([label, color]) => (
             <span className="item" key={label}>
               <span
