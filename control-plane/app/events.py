@@ -13,6 +13,7 @@ replay a transcript and then tail everything after the last seq it saw with no g
 from __future__ import annotations
 
 import json
+import queue
 import threading
 from collections import deque
 from datetime import datetime, timezone
@@ -33,6 +34,10 @@ class RunEventKind(str, Enum):
     memory_delta = "memory_delta"  # the network memory changed (new device, new/closed port, ...)
     refusal = "refusal"          # a model declined an authorized step; reinforce/fallback/final
     error = "error"              # a step failed (e.g. the LLM/provider was unreachable) — surfaced, not swallowed
+    ask = "ask"                  # the agent is asking the operator a question (permission/recommendation)
+    user_reply = "user_reply"    # the operator's reply, echoed into the transcript
+    subagent_started = "subagent_started"    # the orchestrator delegated to a specialist sub-agent
+    subagent_finished = "subagent_finished"  # a specialist sub-agent returned its summary
 
 
 # A run is over once one of these terminal statuses is emitted; the SSE generator drains and closes.
@@ -54,7 +59,37 @@ class RunEvent(BaseModel):
 class RunEventSink(Protocol):
     """What `run_agent(events=...)` needs: assign a seq, record the event, hand it back."""
 
-    def emit(self, run_id: str, engagement_id: str, kind: str, **data) -> RunEvent: ...
+    def emit(self, run_id: str, engagement_id: str, kind: str, /, **data) -> RunEvent: ...
+
+
+class RunInbox:
+    """Reverse channel for the interactive chat: the operator's reply travels from the `/reply`
+    endpoint (request thread) to the run's background thread, which is blocked inside the `ask_user`
+    tool waiting for a decision. One queue per run; thread-safe. This is the only path by which a
+    human message re-enters a run — it carries guidance/permission, never authorization (the scope
+    guard and flag gate still decide what any tool may do)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._queues: dict[str, "queue.Queue[str]"] = {}
+
+    def _q(self, run_id: str) -> "queue.Queue[str]":
+        with self._lock:
+            q = self._queues.get(run_id)
+            if q is None:
+                q = self._queues[run_id] = queue.Queue()
+            return q
+
+    def wait(self, run_id: str, timeout: float) -> Optional[str]:
+        """Block the run thread until a reply arrives or `timeout` seconds pass (None on timeout)."""
+        try:
+            return self._q(run_id).get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def deliver(self, run_id: str, text: str) -> None:
+        """Hand a reply to whichever run thread is (or will be) waiting."""
+        self._q(run_id).put(text)
 
 
 class MemoryRunEventSink:
@@ -65,7 +100,9 @@ class MemoryRunEventSink:
         self.events: list[RunEvent] = []
         self._seq: dict[str, int] = {}
 
-    def emit(self, run_id: str, engagement_id: str, kind: str, **data) -> RunEvent:
+    def emit(self, run_id: str, engagement_id: str, kind: str, /, **data) -> RunEvent:
+        # `run_id`/`engagement_id`/`kind` are positional-only so an event may carry data fields of the
+        # same name (e.g. an ask_user prompt's `kind`) without a "multiple values" collision.
         self._seq[run_id] = self._seq.get(run_id, 0) + 1
         event = RunEvent(
             run_id=run_id, engagement_id=engagement_id, seq=self._seq[run_id],
@@ -90,7 +127,7 @@ class RunEventStore:
         self._seq: dict[str, int] = {}
         self._buffers: dict[str, deque[RunEvent]] = {}
 
-    def emit(self, run_id: str, engagement_id: str, kind: str, **data) -> RunEvent:
+    def emit(self, run_id: str, engagement_id: str, kind: str, /, **data) -> RunEvent:
         with self._lock:
             seq = self._seq.get(run_id, 0) + 1
             self._seq[run_id] = seq

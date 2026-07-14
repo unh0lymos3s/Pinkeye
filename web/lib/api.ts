@@ -55,17 +55,59 @@ export type RunOptions = {
   intensity?: string;
   mode?: "scan" | "agent";
   objective?: string;
+  // Agent-mode tool library: the subset of tools the planner may use. Omit/empty = all tools.
+  enabledTools?: string[];
+  // Agent-mode profile: "full" (orchestrator) | a specialist name | "flat". Omit = "full".
+  profile?: string;
 };
 
 export function createRun(engagementId: string, opts: RunOptions) {
-  const { target, tool = "nmap", intensity = "light", mode = "scan", objective } = opts;
+  const { target, tool = "nmap", intensity = "light", mode = "scan", objective, enabledTools, profile } = opts;
   const body =
-    mode === "agent" ? { target, mode, objective: objective || null } : { target, tool, intensity, mode };
+    mode === "agent"
+      ? {
+          target,
+          mode,
+          objective: objective || null,
+          // Only send a selection when the operator narrowed it; empty/undefined means "all".
+          enabled_tools: enabledTools && enabledTools.length ? enabledTools : null,
+          profile: profile || null,
+        }
+      : { target, tool, intensity, mode };
   return fetch(`${BASE}/engagements/${engagementId}/runs`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   }).then(json<{ id: string; status: string }>);
+}
+
+// ---- tool library (agent-mode tool selection) ----
+
+export type Tool = {
+  name: string;
+  description: string;
+  surface: string; // network | artifact | knowledge
+  requires_flag: string | null; // offensive tools also need a signed-scope flag
+  mcp: boolean;
+};
+
+export function listTools() {
+  return fetch(`${BASE}/tools`, { cache: "no-store" }).then(json<Tool[]>);
+}
+
+// ---- agent profiles (who drives the assessment) ----
+
+export type Profile = {
+  name: string; // "full" | specialist kind | "flat"
+  stage: string | null; // pipeline stage a specialist owns, or null
+  description: string;
+  gated_flag: string | null; // specialists that also need a signed-scope flag
+};
+
+export function listProfiles() {
+  return fetch(`${BASE}/profiles`, { cache: "no-store" }).then(
+    json<{ profiles: Profile[] }>
+  );
 }
 
 // ---- live run events (chat interface) ----
@@ -80,7 +122,11 @@ export type RunEventKind =
   | "status"
   | "memory_delta"
   | "refusal"
-  | "error";
+  | "error"
+  | "ask" // the agent is asking the operator (permission / recommendation / question)
+  | "user_reply" // the operator's reply, echoed into the transcript
+  | "subagent_started" // the orchestrator delegated to a specialist sub-agent
+  | "subagent_finished"; // a specialist sub-agent returned its summary
 
 export type RunEvent = {
   engagement_id: string;
@@ -100,6 +146,16 @@ export function fetchTranscript(runId: string) {
 // URL for an EventSource(SSE) live tail; `after` resumes from the last seq seen (reconnect/replay).
 export function runEventsUrl(runId: string, after = 0) {
   return `${BASE}/runs/${runId}/events?after=${after}`;
+}
+
+// Send the operator's reply to a run waiting on an `ask_user` prompt (the interactive chat's
+// reverse channel). Guidance/permission only — it can never widen the run's authorized scope.
+export function sendReply(runId: string, text: string) {
+  return fetch(`${BASE}/runs/${runId}/reply`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text }),
+  }).then(json<{ ok: boolean }>);
 }
 
 // ---- cross-run network memory ----

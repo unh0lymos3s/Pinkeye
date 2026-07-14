@@ -43,10 +43,27 @@ class GraphClient:
 
     def upsert_engagement(self, engagement_id: str, name: str) -> None:
         with self._driver.session() as session:
+            # engagement_id mirrors id so the Engagement node is included by the per-engagement graph
+            # query (which filters on engagement_id) and thus shows as the root of its discovered hosts.
             session.run(
-                "MERGE (e:Engagement {id: $id}) SET e.name = $name",
+                "MERGE (e:Engagement {id: $id}) SET e.name = $name, e.engagement_id = $id",
                 id=engagement_id,
                 name=name,
+            )
+
+    def link_engagement_hosts(self) -> None:
+        """Backfill for data written before engagement->host linking existed: stamp engagement_id on
+        Engagement nodes and MERGE a DISCOVERED edge to every IP/Endpoint under them. Idempotent, so
+        it is safe to run on every startup."""
+        with self._driver.session() as session:
+            session.run("MATCH (e:Engagement) WHERE e.engagement_id IS NULL SET e.engagement_id = e.id")
+            session.run(
+                "MATCH (i:IP) MATCH (e:Engagement {id: i.engagement_id}) "
+                "MERGE (e)-[:DISCOVERED]->(i)"
+            )
+            session.run(
+                "MATCH (t:Endpoint) MATCH (e:Engagement {id: t.engagement_id}) "
+                "MERGE (e)-[:DISCOVERED]->(t)"
             )
 
     def upsert_service(
@@ -70,10 +87,12 @@ class GraphClient:
         with self._driver.session() as session:
             session.run(
                 """
+                MERGE (e:Engagement {id: $eid}) SET e.engagement_id = $eid
                 MERGE (i:IP {engagement_id: $eid, address: $addr})
                   ON CREATE SET i.first_seen = $now, i.first_run_id = $rid, i.status = 'new'
                   ON MATCH SET i.last_run_id = $rid
                   SET i.last_seen = $now
+                MERGE (e)-[:DISCOVERED]->(i)
                 MERGE (i)-[:EXPOSES]->(p:Port {engagement_id: $eid, address: $addr, number: $port})
                   ON CREATE SET p.first_seen = $now, p.first_run_id = $rid
                   ON MATCH SET p.last_run_id = $rid
@@ -117,7 +136,9 @@ class GraphClient:
             return
         with self._driver.session() as session:
             session.run(
-                "MERGE (i:IP {engagement_id: $eid, address: $addr}) SET " + ", ".join(sets),
+                "MERGE (i:IP {engagement_id: $eid, address: $addr}) SET " + ", ".join(sets)
+                + " MERGE (e:Engagement {id: $eid}) SET e.engagement_id = $eid"
+                + " MERGE (e)-[:DISCOVERED]->(i)",
                 **params,
             )
 
@@ -202,6 +223,8 @@ class GraphClient:
                 + affects +
                 """
                 MERGE (f)-[:AFFECTS]->(t)
+                MERGE (e:Engagement {id: $eid}) SET e.engagement_id = $eid
+                MERGE (e)-[:DISCOVERED]->(t)
                 """,
                 dedup=finding.dedup_key(),
                 id=finding.id,

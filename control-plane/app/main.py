@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from .audit import MemoryAuditSink, PostgresAuditSink
 from .auth import Authenticator, Principal, has_role
 from .config import settings
-from .events import RunEventStore
+from .events import RunEventStore, RunInbox
 from .memory import NetworkMemory
 from .correlation import correlate
 from .db.database import Database
@@ -43,12 +43,13 @@ from .scope import sign_scope
 from .store import Store
 
 # Agent runtime lives in a sibling package; the single-host image installs both.
-from runtime.agent import DEFAULT_MISSION, run_agent
+from runtime.agent import DEFAULT_MISSION, ORCHESTRATOR_MISSION, run_agent
 from runtime.llm.config import get_provider
 from runtime.orchestrator import run_scan
 from runtime.registry import ToolRegistry
 from runtime.sandbox import DockerSandbox
-from runtime.toolset import all_tools
+from runtime.subagents import SPECIALISTS, specialist_mission, specialist_registry
+from runtime.toolset import all_tools, select_tools
 
 app = FastAPI(title="Codename Eye — Control Plane")
 app.add_middleware(
@@ -75,6 +76,9 @@ limiter = RateLimiter()
 # Live run-event stream powering the chat interface. Best-effort persisted to Postgres (migration
 # 0006) with an in-memory ring buffer as the fast path for SSE tailing + reconnect.
 run_events = RunEventStore(db)
+# Reverse channel for the interactive chat: carries an operator's reply from POST /runs/{id}/reply
+# into the run's background thread, which blocks inside the agent's ask_user tool.
+run_inbox = RunInbox()
 
 # Cross-run network memory (the "brain"): the durable, differential map fed back to the agent and
 # surfaced to the UI. Backed by Neo4j (topology) + Postgres (audit-grade diff log). It can never
@@ -123,6 +127,11 @@ def _startup():
         pass
     try:
         graph.apply_schema(os.getenv("EYE_GRAPH_SCHEMA", "/app/graph/schema.cypher"))
+    except Exception:
+        pass
+    try:
+        # Backfill engagement->host DISCOVERED edges for data written before linking existed.
+        graph.link_engagement_hosts()
     except Exception:
         pass
 
@@ -180,6 +189,14 @@ class CreateRun(BaseModel):
     # Optional auth profile for authenticated DAST (e.g. {"header_name": "Authorization",
     # "value_ref": "app-token"}); value_ref resolves from secrets so credentials aren't stored here.
     auth: dict | None = None
+    # Agent-mode "tool library": the subset of tools the planner may use this run. None/empty = all.
+    # A capability restriction only — an unchecked tool is never offered, so it cannot run; the scope
+    # guard and offensive-flag gate still apply on top of whatever remains.
+    enabled_tools: list[str] | None = None
+    # Agent-mode profile (who drives the assessment). None/"full" = an orchestrator that delegates to
+    # specialist sub-agents on demand; a specialist name (recon/dast/sast/intel/exploit/credentials)
+    # runs that single focused specialist directly; "flat" = the legacy single generalist agent.
+    profile: str | None = None
 
 
 class CypherQuery(BaseModel):
@@ -189,6 +206,42 @@ class CypherQuery(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/tools")
+def list_tools():
+    """The tool library the UI renders as checkboxes: every registered tool with the metadata needed
+    to group and label it. `requires_flag` marks offensive tools that also need a signed scope flag."""
+    return [
+        {
+            "name": t.name,
+            "description": getattr(t, "description", ""),
+            "surface": getattr(t, "surface", "network"),
+            "requires_flag": getattr(t, "requires_flag", None),
+            "mcp": getattr(t, "mcp", None) is not None,
+        }
+        for t in TOOLS.values()
+    ]
+
+
+@app.get("/profiles")
+def list_profiles():
+    """Agent profiles the UI offers in the launcher: the orchestrator ("full"), one per specialist
+    sub-agent, and the legacy generalist ("flat"). `gated_flag` marks specialists that also need a
+    signed scope flag (offered but inert without it)."""
+    specialists = [
+        {"name": s.kind, "stage": s.stage, "description": s.summary, "gated_flag": s.gated_flag}
+        for s in SPECIALISTS.values()
+    ]
+    return {
+        "profiles": [
+            {"name": "full", "stage": None, "gated_flag": None,
+             "description": "Orchestrator — delegates to specialist sub-agents on demand."},
+            *specialists,
+            {"name": "flat", "stage": None, "gated_flag": None,
+             "description": "Single generalist agent (legacy)."},
+        ]
+    }
 
 
 @app.get("/cve")
@@ -263,18 +316,41 @@ def create_run(engagement_id: str, body: CreateRun, background: BackgroundTasks,
     # Execute off the request thread. The sandbox is built inside the task, not here, so a Docker
     # problem fails the run (not the API request); the scope guard still runs first inside either path.
     context = {"auth": body.auth} if body.auth else None
-    # Combine the operator's objective with the standard mission. Guidance only — never authorization.
-    mission = DEFAULT_MISSION
+
+    # Tool-library selection: narrow the planner's registry to the operator's checked tools (all if
+    # unspecified). Capability restriction only — the scope guard/flag gate still apply to the rest.
+    planner_tools = select_tools(list(TOOLS.values()), body.enabled_tools)
+
+    # Agent profile: who drives the assessment. "full" (default) = an orchestrator delegating to
+    # specialist sub-agents; a specialist name runs that single focused specialist directly over the
+    # selected tool pool; "flat" = the legacy single generalist agent. Presentation/capability choice
+    # only — the scope guard and offensive-flag gate are unchanged for every path.
+    profile = (body.profile or "full").strip().lower()
+    if body.mode == "agent" and profile not in ({"full", "flat"} | set(SPECIALISTS)):
+        raise HTTPException(400, f"unknown profile: {body.profile}")
+    if profile in SPECIALISTS:
+        base_mission, agent_registry, specialist_pool = (
+            specialist_mission(profile), specialist_registry(profile, planner_tools), None)
+    elif profile == "flat":
+        base_mission, agent_registry, specialist_pool = (
+            DEFAULT_MISSION, ToolRegistry(planner_tools), None)
+    else:  # "full" orchestrator: registry is unused (specs come from the specialist sub-agents)
+        base_mission, agent_registry, specialist_pool = (
+            ORCHESTRATOR_MISSION, ToolRegistry([]), planner_tools)
+
+    # Combine the operator's objective with the chosen mission. Guidance only — never authorization.
+    mission = base_mission
     if body.objective and body.objective.strip():
-        mission = f"{DEFAULT_MISSION}\n\nEngagement objective: {body.objective.strip()}"
+        mission = f"{base_mission}\n\nEngagement objective: {body.objective.strip()}"
 
     def _launch():
         try:
             sandbox = DockerSandbox()
             if body.mode == "agent":
-                run_agent(eng, run, get_provider("planner"), ToolRegistry(list(TOOLS.values())),
+                run_agent(eng, run, get_provider("planner"), agent_registry,
                           sandbox, graph, audit, persistence, mission=mission, context=context,
-                          events=run_events, memory=memory)
+                          events=run_events, memory=memory, inbox=run_inbox,
+                          specialist_pool=specialist_pool)
             else:
                 run_scan(eng, run, tool, body.intensity, sandbox, graph, audit, persistence, context,
                          memory=memory)
@@ -320,6 +396,23 @@ def run_transcript(run_id: str):
     """Full ordered transcript of a run's events, for replay and reconnect. A client reconnecting
     fetches this, renders it, then tails /events?after=<last seq> for anything newer."""
     return {"events": [e.model_dump(mode="json") for e in run_events.all_events(run_id)]}
+
+
+class RunReply(BaseModel):
+    text: str
+
+
+@app.post("/runs/{run_id}/reply")
+def run_reply(run_id: str, body: RunReply):
+    """Deliver the operator's chat reply to a run waiting on an `ask_user` prompt. Guidance/permission
+    only — it re-enters the planner as a tool result and can never widen scope; the scope guard and
+    offensive-flag gate still decide what any subsequent tool call may do. Delivery is fire-and-forget:
+    if the run isn't currently waiting, the message queues until its next ask (or is harmlessly unused)."""
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "reply text is required")
+    run_inbox.deliver(run_id, text)
+    return {"ok": True}
 
 
 @app.get("/runs/{run_id}/events")

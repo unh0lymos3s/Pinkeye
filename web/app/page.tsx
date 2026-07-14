@@ -34,6 +34,22 @@ export default function Home() {
   const [full, setFull] = useState(false);
   const [lastRunId, setLastRunId] = useState("");
   const [changes, setChanges] = useState<MemoryChanges | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  // Fullscreen map: exit on Esc, and lock body scroll while the overlay is up.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFullscreen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [fullscreen]);
 
   // Poll the graph so new findings appear as scans land. Source depends on the "full map" toggle.
   useEffect(() => {
@@ -198,12 +214,24 @@ export default function Home() {
           <span className="live">
             {nodeCount > 0 && <span className="beat" />}
             {nodeCount} nodes · {edgeCount} edges
+            <button
+              className="mini-btn"
+              onClick={() => setFullscreen(true)}
+              title="Expand the map to fill the screen"
+            >
+              ⤢ Fullscreen
+            </button>
           </span>
         }
       >
         Knowledge graph
       </SectionTitle>
-      <div className="card" style={{ padding: 12 }}>
+      <div className={`card graph-card${fullscreen ? " graph-fullscreen" : ""}`} style={{ padding: 12 }}>
+        {fullscreen && (
+          <button className="mini-btn graph-fs-exit" onClick={() => setFullscreen(false)}>
+            ✕ Exit fullscreen (Esc)
+          </button>
+        )}
         <div className="legend" style={{ padding: "4px 6px 12px" }}>
           {[
             ["Engagement", "var(--node-engagement)"],
@@ -219,10 +247,10 @@ export default function Home() {
           ))}
           {/* Cross-run memory badges rendered as rings by GraphView. */}
           {[
-            ["⚠ exploitable", "#f59e0b"],
-            ["new", "#22c55e"],
-            ["changed", "#f59e0b"],
-            ["gone", "#64748b"],
+            ["⚠ exploitable", "#ffb020"],
+            ["new", "#34e57a"],
+            ["changed", "#ffb020"],
+            ["gone", "#5f7a66"],
           ].map(([label, color]) => (
             <span className="item" key={label}>
               <span
@@ -233,10 +261,14 @@ export default function Home() {
             </span>
           ))}
         </div>
-        <GraphView graph={graph} />
-        {nodeCount === 0 && (
+        <GraphView graph={graph} fill={fullscreen} />
+        {nodeCount === 0 ? (
           <div className="dim" style={{ textAlign: "center", padding: "12px 0 4px", fontSize: 13 }}>
             No graph data yet — launch a run to populate hosts, ports, services, and findings.
+          </div>
+        ) : (
+          <div className="dim" style={{ textAlign: "center", padding: "8px 0 2px", fontSize: 11.5 }}>
+            drag to pan · scroll to zoom · double-click to reset
           </div>
         )}
       </div>
