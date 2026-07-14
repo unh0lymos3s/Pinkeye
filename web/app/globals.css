@@ -277,3 +277,35 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 .chat .msg.change .who { color: var(--brand); }
 .chat .msg.sys.refusal { border: 1px solid rgba(234,179,8,0.4); background: rgba(234,179,8,0.07); padding: 8px 11px; border-radius: var(--radius-sm); font-family: inherit; }
 .chat .msg.sys.refusal .who { color: var(--warn); }
+
+/* ---- Knowledge-graph fullscreen ---- */
+.mini-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 9px;
+  margin-left: 10px;
+  border-radius: var(--radius-sm);
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.mini-btn:hover { border-color: var(--border-strong); color: var(--text); background: var(--surface-2, var(--surface)); }
+
+.graph-card { transition: none; }
+.graph-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  margin: 0;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 16px !important;
+  background: var(--bg);
+}
+/* In fullscreen, the graph area grows to fill the remaining height. */
+.graph-fullscreen > svg { flex: 1; min-height: 0; }
+.graph-fs-exit { align-self: flex-end; margin: 0 0 8px 0; }

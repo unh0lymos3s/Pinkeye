@@ -2,7 +2,7 @@
 // Self-contained SVG knowledge-graph view. Runs a tiny force simulation client-side so we don't
 // pull in an external graph library. Colors nodes by their Neo4j label. Renders responsively via
 // a fixed simulation coordinate space projected through an SVG viewBox.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { Graph } from "../lib/api";
 
 const COLORS: Record<string, string> = {
@@ -46,10 +46,59 @@ function nodeTitle(props: Record<string, unknown>): string {
   );
 }
 
-export default function GraphView({ graph }: { graph: Graph }) {
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+export default function GraphView({ graph, fill = false }: { graph: Graph; fill?: boolean }) {
   const [nodes, setNodes] = useState<P[]>([]);
   const [hover, setHover] = useState<string | null>(null);
   const raf = useRef<number>();
+
+  // Pan/zoom navigation: the viewBox is the "camera". Dragging pans it; the wheel zooms toward the
+  // cursor; double-click resets. Node positions come from the simulation and are unaffected.
+  const [view, setView] = useState({ x: 0, y: 0, w: W, h: H });
+  const [panning, setPanning] = useState(false);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const drag = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
+  const resetView = () => setView({ x: 0, y: 0, w: W, h: H });
+
+  const onDown = (e: ReactMouseEvent) => {
+    drag.current = { sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
+    setPanning(true);
+  };
+  const onMove = (e: ReactMouseEvent) => {
+    const d = drag.current;
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!d || !rect) return;
+    setView((v) => ({
+      ...v,
+      x: d.vx - (e.clientX - d.sx) * (v.w / rect.width),
+      y: d.vy - (e.clientY - d.sy) * (v.h / rect.height),
+    }));
+  };
+  const endPan = () => {
+    drag.current = null;
+    setPanning(false);
+  };
+
+  // Wheel zoom needs a non-passive native listener so preventDefault stops the page from scrolling.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = svg.getBoundingClientRect();
+      const factor = e.deltaY < 0 ? 0.85 : 1.0 / 0.85; // in / out
+      setView((v) => {
+        const nw = clamp(v.w * factor, W * 0.2, W * 3);
+        const nh = nw * (H / W); // keep the coordinate-space aspect so nodes don't distort
+        const fx = (e.clientX - rect.left) / rect.width;
+        const fy = (e.clientY - rect.top) / rect.height;
+        return { x: v.x + fx * v.w - fx * nw, y: v.y + fy * v.h - fy * nh, w: nw, h: nh };
+      });
+    };
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+  }, []);
 
   // Seed node positions whenever the graph identity set changes.
   const seed = useMemo(() => graph.nodes.map((n) => n.id).join(","), [graph]);
@@ -114,13 +163,25 @@ export default function GraphView({ graph }: { graph: Graph }) {
 
   return (
     <svg
-      viewBox={`0 0 ${W} ${H}`}
+      ref={svgRef}
+      viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
       width="100%"
+      // In fullscreen the container drives the size (svg fills it, viewBox keeps it centered);
+      // otherwise the fixed aspect ratio keeps the inline card a sensible height.
+      height={fill ? "100%" : undefined}
+      preserveAspectRatio="xMidYMid meet"
+      onMouseDown={onDown}
+      onMouseMove={onMove}
+      onMouseUp={endPan}
+      onMouseLeave={endPan}
+      onDoubleClick={resetView}
       style={{
         display: "block",
         background: "radial-gradient(circle at 50% 40%, #141a26, #0e121b)",
         borderRadius: 8,
-        aspectRatio: `${W} / ${H}`,
+        cursor: panning ? "grabbing" : "grab",
+        touchAction: "none",
+        ...(fill ? { flex: 1, minHeight: 0, height: "100%" } : { aspectRatio: `${W} / ${H}` }),
       }}
     >
       {graph.edges.map((e, i) => {
