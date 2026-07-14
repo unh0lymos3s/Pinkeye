@@ -48,7 +48,7 @@ from runtime.llm.config import get_provider
 from runtime.orchestrator import run_scan
 from runtime.registry import ToolRegistry
 from runtime.sandbox import DockerSandbox
-from runtime.toolset import all_tools
+from runtime.toolset import all_tools, select_tools
 
 app = FastAPI(title="Codename Eye — Control Plane")
 app.add_middleware(
@@ -125,6 +125,11 @@ def _startup():
         graph.apply_schema(os.getenv("EYE_GRAPH_SCHEMA", "/app/graph/schema.cypher"))
     except Exception:
         pass
+    try:
+        # Backfill engagement->host DISCOVERED edges for data written before linking existed.
+        graph.link_engagement_hosts()
+    except Exception:
+        pass
 
 
 @app.on_event("shutdown")
@@ -180,6 +185,10 @@ class CreateRun(BaseModel):
     # Optional auth profile for authenticated DAST (e.g. {"header_name": "Authorization",
     # "value_ref": "app-token"}); value_ref resolves from secrets so credentials aren't stored here.
     auth: dict | None = None
+    # Agent-mode "tool library": the subset of tools the planner may use this run. None/empty = all.
+    # A capability restriction only — an unchecked tool is never offered, so it cannot run; the scope
+    # guard and offensive-flag gate still apply on top of whatever remains.
+    enabled_tools: list[str] | None = None
 
 
 class CypherQuery(BaseModel):
@@ -189,6 +198,22 @@ class CypherQuery(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/tools")
+def list_tools():
+    """The tool library the UI renders as checkboxes: every registered tool with the metadata needed
+    to group and label it. `requires_flag` marks offensive tools that also need a signed scope flag."""
+    return [
+        {
+            "name": t.name,
+            "description": getattr(t, "description", ""),
+            "surface": getattr(t, "surface", "network"),
+            "requires_flag": getattr(t, "requires_flag", None),
+            "mcp": getattr(t, "mcp", None) is not None,
+        }
+        for t in TOOLS.values()
+    ]
 
 
 @app.get("/cve")
@@ -268,11 +293,15 @@ def create_run(engagement_id: str, body: CreateRun, background: BackgroundTasks,
     if body.objective and body.objective.strip():
         mission = f"{DEFAULT_MISSION}\n\nEngagement objective: {body.objective.strip()}"
 
+    # Tool-library selection: narrow the planner's registry to the operator's checked tools (all if
+    # unspecified). Capability restriction only — the scope guard/flag gate still apply to the rest.
+    planner_tools = select_tools(list(TOOLS.values()), body.enabled_tools)
+
     def _launch():
         try:
             sandbox = DockerSandbox()
             if body.mode == "agent":
-                run_agent(eng, run, get_provider("planner"), ToolRegistry(list(TOOLS.values())),
+                run_agent(eng, run, get_provider("planner"), ToolRegistry(planner_tools),
                           sandbox, graph, audit, persistence, mission=mission, context=context,
                           events=run_events, memory=memory)
             else:
