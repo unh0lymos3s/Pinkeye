@@ -17,7 +17,24 @@ const COLORS: Record<string, string> = {
 const W = 960;
 const H = 560;
 
-type P = { id: string; label: string; x: number; y: number; vx: number; vy: number; title: string };
+type P = {
+  id: string;
+  label: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  title: string;
+  exploitable: boolean; // Service/Endpoint proven exploitable, or a target device
+  status: string; // cross-run memory status: new | changed | active | gone
+};
+
+// Ring color for a node's cross-run memory status; null = no status ring.
+const STATUS_COLOR: Record<string, string> = {
+  new: "#22c55e",
+  changed: "#f59e0b",
+  gone: "#64748b",
+};
 
 function nodeTitle(props: Record<string, unknown>): string {
   return (
@@ -42,6 +59,8 @@ export default function GraphView({ graph }: { graph: Graph }) {
         id: n.id,
         label: n.label,
         title: nodeTitle(n.props),
+        exploitable: Boolean(n.props.exploitable || n.props.is_target),
+        status: (n.props.status as string) || "",
         x: W / 2 + Math.cos((i / Math.max(1, graph.nodes.length)) * 2 * Math.PI) * 180,
         y: H / 2 + Math.sin((i / Math.max(1, graph.nodes.length)) * 2 * Math.PI) * 180,
         vx: 0,
@@ -121,19 +140,46 @@ export default function GraphView({ graph }: { graph: Graph }) {
         const color = COLORS[n.label] || COLORS.Node;
         const active = hover === n.id;
         const r = n.label === "Finding" ? 9 : 7;
+        const statusColor = STATUS_COLOR[n.status];
+        const gone = n.status === "gone";
+        const tip = [n.label, n.title].join(": ")
+          + (n.exploitable ? "  ⚠ exploitable" : "")
+          + (n.status ? `  (${n.status})` : "");
         return (
           <g
             key={n.id}
             onMouseEnter={() => setHover(n.id)}
             onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
-            style={{ cursor: "default" }}
+            style={{ cursor: "default", opacity: gone ? 0.5 : 1 }}
           >
             {active && <circle cx={n.x} cy={n.y} r={r + 5} fill={color} opacity={0.18} />}
+            {/* Exploitable ring: an amber halo flags a proven-exploitable service/endpoint or target device. */}
+            {n.exploitable && (
+              <circle cx={n.x} cy={n.y} r={r + 4} fill="none" stroke="#f59e0b" strokeWidth={2} opacity={0.95} />
+            )}
+            {/* Cross-run status ring: new / changed / gone from the memory engine. */}
+            {statusColor && (
+              <circle
+                cx={n.x}
+                cy={n.y}
+                r={r + (n.exploitable ? 7 : 3)}
+                fill="none"
+                stroke={statusColor}
+                strokeWidth={1.4}
+                strokeDasharray={gone ? "3 2" : undefined}
+                opacity={0.9}
+              />
+            )}
             <circle cx={n.x} cy={n.y} r={r} fill={color} stroke="#0e121b" strokeWidth={1.5} />
-            <text x={n.x + r + 4} y={n.y + 4} fontSize={11} fill={active ? "#e8eaf0" : "#9aa5b8"}>
+            {n.exploitable && (
+              <text x={n.x} y={n.y + 3.5} fontSize={9} textAnchor="middle" fill="#0e121b" fontWeight={700}>
+                !
+              </text>
+            )}
+            <text x={n.x + r + 6} y={n.y + 4} fontSize={11} fill={active ? "#e8eaf0" : "#9aa5b8"}>
               {n.title}
             </text>
-            <title>{`${n.label}: ${n.title}`}</title>
+            <title>{tip}</title>
           </g>
         );
       })}

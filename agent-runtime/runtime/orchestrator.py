@@ -31,6 +31,9 @@ class StepResult:
     findings: list[Finding] = field(default_factory=list)
     note: str = ""  # informational text from knowledge tools, surfaced to the model
     error: str | None = None
+    # Cross-run network-memory diff produced by this step (if a memory engine is wired in), so the
+    # caller can surface "what changed" without re-querying. None when no memory is attached.
+    memory_delta: object | None = None
 
 
 def execute_tool_step(
@@ -44,10 +47,14 @@ def execute_tool_step(
     audit: AuditSink,
     db=None,
     context: dict | None = None,
+    memory=None,
 ) -> StepResult:
     """Run one tool against one target. Returns what was found so a caller (or the model) can react.
     Does not touch run.status — that belongs to the caller, which may run many steps per run.
-    `context` carries optional extras (auth profile, exploit options) for tools that accept it."""
+    `context` carries optional extras (auth profile, exploit options) for tools that accept it.
+    `memory`, if provided, is the cross-run NetworkMemory: a persistence concern beside the existing
+    graph/db writes, guarded by `memory is not None`, so the security-critical control flow is
+    unchanged whether or not a memory engine is attached."""
     context = context or {}
     surface = getattr(tool, "surface", "network")
 
@@ -75,6 +82,15 @@ def execute_tool_step(
                                  engagement_id=engagement.id, run_id=run.id)
             _audit(audit, engagement.id, run.id, type=EventType.tool_finished, tool=tool.name,
                    target=target, detail=f"local: {len(out.findings)} findings")
+        elif getattr(tool, "mcp", None) is not None:
+            # MCP-backed execution: authorization/flag/audit above already ran (identical to a
+            # sandboxed tool), so the MCP server only ever receives an in-scope target. This is a
+            # distinct trust boundary from the sandbox — an external server we call, not run — so it
+            # gets its own audit detail and no egress policy is applied to our containers.
+            out = tool.run_mcp(target=target, intensity=intensity, context=context,
+                               engagement_id=engagement.id, run_id=run.id)
+            _audit(audit, engagement.id, run.id, type=EventType.tool_finished, tool=tool.name,
+                   target=target, detail=f"mcp[{tool.mcp.command}:{tool.mcp.tool}]: {len(out.findings)} findings")
         else:
             command = (
                 tool.build_command(target, intensity, context)
@@ -94,7 +110,8 @@ def execute_tool_step(
 
     # 3. Persist topology + findings to the graph and (if configured) the durable store.
     for svc in out.services:
-        graph.upsert_service(engagement.id, svc.address, svc.port, svc.proto, svc.service, svc.product)
+        graph.upsert_service(engagement.id, svc.address, svc.port, svc.proto, svc.service,
+                             svc.product, run.id)
         if db is not None:
             db.upsert_service(engagement.id, svc.address, svc.port, svc.proto, svc.service, svc.product)
     for finding in out.findings:
@@ -105,7 +122,18 @@ def execute_tool_step(
         _audit(audit, engagement.id, run.id, type=EventType.finding_recorded, tool=finding.source_tool,
                target=finding.target, detail=f"{finding.severity.value}: {finding.title}")
 
-    return StepResult(allowed=True, services=out.services, findings=out.findings, note=out.note)
+    # 4. Cross-run memory (optional): record what this observation changed vs the persisted map. Runs
+    #    after the authoritative graph/db writes and never affects them — a memory failure is swallowed
+    #    so it can't fail a run or influence authorization.
+    delta = None
+    if memory is not None:
+        try:
+            delta = memory.observe(engagement.id, run.id, out.services, out.findings)
+        except Exception:
+            delta = None
+
+    return StepResult(allowed=True, services=out.services, findings=out.findings, note=out.note,
+                      memory_delta=delta)
 
 
 def run_scan(
@@ -118,8 +146,12 @@ def run_scan(
     audit: AuditSink,
     db=None,
     context: dict | None = None,
+    memory=None,
 ) -> Run:
-    """Deterministic single-tool run (Phase 1 path). Wraps one execute_tool_step and manages status."""
+    """Deterministic single-tool run (Phase 1 path). Wraps one execute_tool_step and manages status.
+    `memory`, if provided, records what this scan changed in the cross-run map so single-tool runs
+    feed the "brain" just like agent runs — still a persistence concern beside the graph/db writes,
+    never touching authorization."""
 
     def _set_status(status: RunStatus) -> None:
         run.status = status
@@ -127,7 +159,7 @@ def run_scan(
             db.set_run_status(run.id, status.value)
 
     step = execute_tool_step(
-        engagement, run, tool, run.target, intensity, sandbox, graph, audit, db, context
+        engagement, run, tool, run.target, intensity, sandbox, graph, audit, db, context, memory
     )
     if not step.allowed:
         _set_status(RunStatus.rejected)

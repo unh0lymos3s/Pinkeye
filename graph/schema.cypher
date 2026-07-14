@@ -29,3 +29,14 @@ CREATE INDEX finding_engagement IF NOT EXISTS
 
 CREATE INDEX ip_engagement IF NOT EXISTS
   FOR (i:IP) ON (i.engagement_id);
+
+// Cross-run memory: index the bookkeeping the memory engine diffs on. No new uniqueness keys — the
+// MERGE keys are unchanged, so nothing duplicates; these only speed up "what changed" / status reads.
+CREATE INDEX ip_status IF NOT EXISTS
+  FOR (i:IP) ON (i.status);
+
+CREATE INDEX ip_last_run IF NOT EXISTS
+  FOR (i:IP) ON (i.last_run_id);
+
+CREATE INDEX service_last_run IF NOT EXISTS
+  FOR (s:Service) ON (s.last_run_id);

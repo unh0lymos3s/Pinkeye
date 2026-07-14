@@ -1,11 +1,13 @@
 """Anthropic Claude adapter. The SDK is imported lazily so the harness runs without it installed."""
 from __future__ import annotations
 
+import os
+
 from .base import LLMProvider, Message, ProviderResponse, ToolCall, ToolSpec
 
 
 class ClaudeProvider(LLMProvider):
-    def __init__(self, model: str = "claude-fable-5", api_key: str | None = None, max_tokens: int = 2048):
+    def __init__(self, model: str = "claude-fable-5", api_key: str | None = None, max_tokens: int = 8192):
         self._model = model
         self._api_key = api_key
         self._max_tokens = max_tokens
@@ -15,7 +17,24 @@ class ClaudeProvider(LLMProvider):
         if self._client is None:
             import anthropic
 
-            self._client = anthropic.Anthropic(api_key=self._api_key)
+            def _f(name, default):
+                try:
+                    return float(os.getenv(name, ""))
+                except ValueError:
+                    return default
+
+            def _i(name, default):
+                try:
+                    return int(os.getenv(name, ""))
+                except ValueError:
+                    return default
+
+            # Fail fast rather than hang on an unreachable endpoint (see openai_compat).
+            self._client = anthropic.Anthropic(
+                api_key=self._api_key,
+                timeout=_f("EYE_LLM_TIMEOUT", 120.0),
+                max_retries=_i("EYE_LLM_MAX_RETRIES", 1),
+            )
         return self._client
 
     def complete(self, messages: list[Message], tools: list[ToolSpec]) -> ProviderResponse:

@@ -14,6 +14,10 @@ _SEVERITY_MAP = {
     "info": Severity.info,
     "informational": Severity.info,
     "unknown": Severity.info,
+    # Semgrep (and SARIF-style) tools grade by ERROR/WARNING/INFO rather than critical..low.
+    "error": Severity.high,
+    "warning": Severity.medium,
+    "note": Severity.info,
 }
 
 

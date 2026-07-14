@@ -54,16 +54,95 @@ export type RunOptions = {
   tool?: string;
   intensity?: string;
   mode?: "scan" | "agent";
+  objective?: string;
 };
 
 export function createRun(engagementId: string, opts: RunOptions) {
-  const { target, tool = "nmap", intensity = "light", mode = "scan" } = opts;
-  const body = mode === "agent" ? { target, mode } : { target, tool, intensity, mode };
+  const { target, tool = "nmap", intensity = "light", mode = "scan", objective } = opts;
+  const body =
+    mode === "agent" ? { target, mode, objective: objective || null } : { target, tool, intensity, mode };
   return fetch(`${BASE}/engagements/${engagementId}/runs`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   }).then(json<{ id: string; status: string }>);
+}
+
+// ---- live run events (chat interface) ----
+
+export type RunEventKind =
+  | "plan"
+  | "thinking"
+  | "tool_call"
+  | "tool_started"
+  | "tool_finished"
+  | "finding"
+  | "status"
+  | "memory_delta"
+  | "refusal"
+  | "error";
+
+export type RunEvent = {
+  engagement_id: string;
+  run_id: string;
+  seq: number;
+  kind: RunEventKind;
+  data: Record<string, any>;
+  at: string;
+};
+
+export function fetchTranscript(runId: string) {
+  return fetch(`${BASE}/runs/${runId}/transcript`, { cache: "no-store" }).then(
+    json<{ events: RunEvent[] }>
+  );
+}
+
+// URL for an EventSource(SSE) live tail; `after` resumes from the last seq seen (reconnect/replay).
+export function runEventsUrl(runId: string, after = 0) {
+  return `${BASE}/runs/${runId}/events?after=${after}`;
+}
+
+// ---- cross-run network memory ----
+
+export type MemoryService = {
+  port: number;
+  proto: string;
+  service: string;
+  product: string;
+  exploitable: boolean;
+};
+
+export type MemoryDevice = {
+  address: string;
+  hostname: string | null;
+  os: string | null;
+  device_type: string | null;
+  status: string;
+  is_target: boolean;
+  services: MemoryService[];
+  exploitable_count: number;
+};
+
+export type MemorySnapshot = { devices: MemoryDevice[]; endpoints: string[] };
+
+export type MemoryChangeEntry = { kind: string; key: string; label: string; before: any; after: any };
+export type MemoryChanges = {
+  added: MemoryChangeEntry[];
+  changed: MemoryChangeEntry[];
+  removed: MemoryChangeEntry[];
+  newly_exploitable: MemoryChangeEntry[];
+};
+
+export function fetchMemory(engagementId: string) {
+  return fetch(`${BASE}/engagements/${engagementId}/memory`, { cache: "no-store" }).then(
+    json<MemorySnapshot>
+  );
+}
+
+export function fetchChanges(engagementId: string, runId: string) {
+  return fetch(`${BASE}/engagements/${engagementId}/changes?run_id=${runId}`, {
+    cache: "no-store",
+  }).then(json<MemoryChanges>);
 }
 
 export type Chain = {

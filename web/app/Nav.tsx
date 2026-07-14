@@ -6,6 +6,7 @@ import { API_BASE } from "../lib/api";
 
 const LINKS = [
   { href: "/", label: "Network Map" },
+  { href: "/agent", label: "Agent Chat" },
   { href: "/dashboard", label: "Dashboard" },
   { href: "/query", label: "Query" },
   { href: "/guide", label: "Guide" },

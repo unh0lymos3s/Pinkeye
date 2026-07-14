@@ -5,7 +5,15 @@ import { useEffect, useState } from "react";
 import GraphView from "./GraphView";
 import EngagementPicker from "./EngagementPicker";
 import { Callout, SectionTitle } from "./ui";
-import { createEngagement, createRun, fetchGraph, fetchMap, type Graph } from "../lib/api";
+import {
+  createEngagement,
+  createRun,
+  fetchChanges,
+  fetchGraph,
+  fetchMap,
+  type Graph,
+  type MemoryChanges,
+} from "../lib/api";
 import { useEngagement } from "../lib/useEngagement";
 
 // Deterministic single-tool scans the map view offers directly. Agent mode ignores this.
@@ -24,6 +32,8 @@ export default function Home() {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [full, setFull] = useState(false);
+  const [lastRunId, setLastRunId] = useState("");
+  const [changes, setChanges] = useState<MemoryChanges | null>(null);
 
   // Poll the graph so new findings appear as scans land. Source depends on the "full map" toggle.
   useEffect(() => {
@@ -35,6 +45,21 @@ export default function Home() {
     const t = setInterval(tick, 3000);
     return () => clearInterval(t);
   }, [selected, full]);
+
+  // Poll the cross-run memory diff for the most recent run so "what changed since last run" fills in
+  // as the run's observations land. Cleared whenever the engagement or tracked run changes.
+  useEffect(() => {
+    if (!selected || !lastRunId) {
+      setChanges(null);
+      return;
+    }
+    const tick = () => {
+      fetchChanges(selected, lastRunId).then(setChanges).catch(() => {});
+    };
+    tick();
+    const t = setInterval(tick, 3000);
+    return () => clearInterval(t);
+  }, [selected, lastRunId]);
 
   async function onCreate() {
     if (!name.trim()) return;
@@ -62,6 +87,7 @@ export default function Home() {
     setStatus(mode === "agent" ? "launching agent run (scope-checked)…" : "launching scan (scope-checked)…");
     try {
       const run = await createRun(selected, { target, tool, intensity, mode });
+      setLastRunId(run.id);
       setStatus(`run ${run.id.slice(0, 8)} — ${run.status}`);
     } catch (e) {
       setStatus(`error: ${String(e)}`);
@@ -191,6 +217,21 @@ export default function Home() {
               {label}
             </span>
           ))}
+          {/* Cross-run memory badges rendered as rings by GraphView. */}
+          {[
+            ["⚠ exploitable", "#f59e0b"],
+            ["new", "#22c55e"],
+            ["changed", "#f59e0b"],
+            ["gone", "#64748b"],
+          ].map(([label, color]) => (
+            <span className="item" key={label}>
+              <span
+                className="swatch"
+                style={{ background: "transparent", boxShadow: `inset 0 0 0 2px ${color}` }}
+              />
+              {label}
+            </span>
+          ))}
         </div>
         <GraphView graph={graph} />
         {nodeCount === 0 && (
@@ -199,6 +240,63 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {lastRunId && <ChangesPanel changes={changes} />}
     </main>
+  );
+}
+
+// The cross-run memory diff for the most recent run: new/changed/gone topology and newly-exploitable
+// targets, so an operator sees at a glance what this run added over prior knowledge. Fed by the
+// /changes endpoint; the same deltas the agent chat surfaces inline.
+function ChangesPanel({ changes }: { changes: MemoryChanges | null }) {
+  const groups: [string, string, MemoryChanges["added"]][] = changes
+    ? [
+        ["Newly exploitable", "danger", changes.newly_exploitable],
+        ["New", "new", changes.added],
+        ["Changed", "changed", changes.changed],
+        ["Gone", "gone", changes.removed],
+      ]
+    : [];
+  const total = groups.reduce((n, [, , items]) => n + items.length, 0);
+  return (
+    <>
+      <SectionTitle
+        action={
+          <span className="live">
+            {total > 0 && <span className="beat" />}
+            {total} change{total === 1 ? "" : "s"}
+          </span>
+        }
+      >
+        Changes since last run
+      </SectionTitle>
+      <div className="card card-pad">
+        {total === 0 ? (
+          <div className="dim" style={{ fontSize: 13 }}>
+            {changes
+              ? "No topology changes recorded for the latest run — the map matched prior knowledge."
+              : "Waiting for the latest run's observations…"}
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {groups
+              .filter(([, , items]) => items.length > 0)
+              .map(([label, kind, items]) =>
+                items.map((c, i) => (
+                  <div
+                    key={`${label}-${c.key}-${i}`}
+                    className="row"
+                    style={{ alignItems: "center", gap: 8, fontSize: 13 }}
+                  >
+                    <span className={`change-tag change-${kind}`}>{label}</span>
+                    <span className="mono">{c.label || c.key}</span>
+                  </div>
+                ))
+              )}
+          </div>
+        )}
+      </div>
+    </>
   );
 }

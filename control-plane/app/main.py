@@ -6,18 +6,24 @@ is unreachable the API falls back to an in-memory cache so the single-host dev s
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import time
+import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .audit import MemoryAuditSink, PostgresAuditSink
 from .auth import Authenticator, Principal, has_role
 from .config import settings
+from .events import RunEventStore
+from .memory import NetworkMemory
 from .correlation import correlate
 from .db.database import Database
 from .graph import GraphClient
@@ -37,7 +43,7 @@ from .scope import sign_scope
 from .store import Store
 
 # Agent runtime lives in a sibling package; the single-host image installs both.
-from runtime.agent import run_agent
+from runtime.agent import DEFAULT_MISSION, run_agent
 from runtime.llm.config import get_provider
 from runtime.orchestrator import run_scan
 from runtime.registry import ToolRegistry
@@ -65,6 +71,15 @@ TOOLS = {t.name: t for t in all_tools(db)}
 # Phase 7: authentication + per-tenant rate limiting. With no EYE_API_KEYS set, auth is open dev mode.
 authenticator = Authenticator()
 limiter = RateLimiter()
+
+# Live run-event stream powering the chat interface. Best-effort persisted to Postgres (migration
+# 0006) with an in-memory ring buffer as the fast path for SSE tailing + reconnect.
+run_events = RunEventStore(db)
+
+# Cross-run network memory (the "brain"): the durable, differential map fed back to the agent and
+# surfaced to the UI. Backed by Neo4j (topology) + Postgres (audit-grade diff log). It can never
+# widen a scope — it is guidance and record-keeping only.
+memory = NetworkMemory(graph, db)
 
 
 def get_principal(x_api_key: str | None = Header(default=None)) -> Principal:
@@ -112,6 +127,17 @@ def _startup():
         pass
 
 
+@app.on_event("shutdown")
+def _shutdown():
+    # Close any warm pooled MCP sessions so their sibling containers never leak past the API process.
+    try:
+        from runtime.mcp import shutdown_pool
+
+        shutdown_pool()
+    except Exception:
+        pass
+
+
 def _save_engagement(e: Engagement, tenant_id: str = "default") -> None:
     store.add_engagement(e)  # always cache
     try:
@@ -148,6 +174,9 @@ class CreateRun(BaseModel):
     intensity: Intensity = Intensity.light
     # "scan" runs one tool deterministically; "agent" lets the LLM plan multi-step recon.
     mode: str = "scan"
+    # Agent-mode free-text objective from the chat UI. Combined with DEFAULT_MISSION as guidance; it
+    # is NOT authorization — every tool call is still checked against the signed scope.
+    objective: str | None = None
     # Optional auth profile for authenticated DAST (e.g. {"header_name": "Authorization",
     # "value_ref": "app-token"}); value_ref resolves from secrets so credentials aren't stored here.
     auth: dict | None = None
@@ -234,21 +263,35 @@ def create_run(engagement_id: str, body: CreateRun, background: BackgroundTasks,
     # Execute off the request thread. The sandbox is built inside the task, not here, so a Docker
     # problem fails the run (not the API request); the scope guard still runs first inside either path.
     context = {"auth": body.auth} if body.auth else None
+    # Combine the operator's objective with the standard mission. Guidance only — never authorization.
+    mission = DEFAULT_MISSION
+    if body.objective and body.objective.strip():
+        mission = f"{DEFAULT_MISSION}\n\nEngagement objective: {body.objective.strip()}"
 
     def _launch():
         try:
             sandbox = DockerSandbox()
             if body.mode == "agent":
                 run_agent(eng, run, get_provider("planner"), ToolRegistry(list(TOOLS.values())),
-                          sandbox, graph, audit, persistence, context=context)
+                          sandbox, graph, audit, persistence, mission=mission, context=context,
+                          events=run_events, memory=memory)
             else:
-                run_scan(eng, run, tool, body.intensity, sandbox, graph, audit, persistence, context)
-        except Exception:
-            # Any setup failure (e.g. Docker unavailable) must mark the run failed, not leave it
-            # stuck in "running". Best-effort — the durable store may itself be down.
+                run_scan(eng, run, tool, body.intensity, sandbox, graph, audit, persistence, context,
+                         memory=memory)
+        except Exception as exc:
+            # Any setup failure (e.g. Docker unavailable, provider unreachable) must mark the run
+            # failed AND be visible — never leave it stuck in "running" with silent logs.
+            traceback.print_exc()  # to the container log
             run.status = RunStatus.failed
             try:
                 persistence.set_run_status(run.id, RunStatus.failed.value)
+            except Exception:
+                pass
+            # Emit a terminal status + error so the UI/SSE stops waiting and shows the cause.
+            try:
+                run_events.emit(run.id, engagement_id, "error", scope="launch",
+                                message=f"{type(exc).__name__}: {exc}")
+                run_events.emit(run.id, engagement_id, "status", status=RunStatus.failed.value)
             except Exception:
                 pass
 
@@ -268,6 +311,49 @@ def get_run(run_id: str):
     if not run:
         raise HTTPException(404, "run not found")
     return run
+
+
+# ---- live run event stream (chat interface) ----
+
+@app.get("/runs/{run_id}/transcript")
+def run_transcript(run_id: str):
+    """Full ordered transcript of a run's events, for replay and reconnect. A client reconnecting
+    fetches this, renders it, then tails /events?after=<last seq> for anything newer."""
+    return {"events": [e.model_dump(mode="json") for e in run_events.all_events(run_id)]}
+
+
+@app.get("/runs/{run_id}/events")
+async def run_events_stream(run_id: str, request: Request, after: int = 0):
+    """Server-Sent Events tail of a run. Polls the in-memory store by seq (memory-first) rather than
+    bridging the run's background thread into the event loop — which also gives replay/reconnect for
+    free via ?after=<seq>. Closes cleanly on terminal status, client disconnect, or a safety timeout.
+    """
+    poll_interval = 0.4
+    max_duration = 30 * 60  # hard cap so an abandoned or hung run can't stream forever
+
+    async def gen():
+        last = after
+        started = time.monotonic()
+        while True:
+            if await request.is_disconnected():
+                break
+            terminal = False
+            for ev in run_events.events_after(run_id, last):
+                last = ev.seq
+                yield f"id: {ev.seq}\ndata: {json.dumps(ev.model_dump(mode='json'))}\n\n"
+                if ev.is_terminal():
+                    terminal = True
+            if terminal:
+                break  # all events up to and including the terminal status have been drained
+            if time.monotonic() - started > max_duration:
+                break
+            await asyncio.sleep(poll_interval)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---- network map (graph) ----
@@ -330,6 +416,20 @@ def engagement_metrics(engagement_id: str):
         return metrics.kpis(engagement_id)
     except Exception as exc:
         raise HTTPException(503, f"metrics store unavailable: {exc}")
+
+
+# ---- cross-run network memory (the "brain") ----
+
+@app.get("/engagements/{engagement_id}/memory")
+def engagement_memory(engagement_id: str):
+    """Current differential map: devices, their service clusters, and exploitable/target flags."""
+    return memory.snapshot(engagement_id)
+
+
+@app.get("/engagements/{engagement_id}/changes")
+def engagement_changes(engagement_id: str, run_id: str):
+    """What a specific run changed vs the remembered map — the "changes since last run" feed."""
+    return memory.deltas_for_run(run_id).to_dict()
 
 
 # ---- Phase 5: correlation, validation, reporting ----

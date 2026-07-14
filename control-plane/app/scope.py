@@ -60,6 +60,35 @@ def _target_in_cidrs(target: str, cidrs: list[str]) -> bool:
     return False
 
 
+def _target_host(target: str) -> str:
+    """Extract the bare host from a network target for the scope decision.
+
+    Tools legitimately pass a target with a URL scheme (`http://10.0.0.5/app`, for nuclei/nikto/zap)
+    or a port (`10.0.0.5:443`, for nmap port scans / tls_cert). The authorization boundary is the
+    *host*, not the port or path, so we peel those off before matching CIDRs/domains. Extraction is
+    conservative and follows standard URL-authority rules (userinfo before `@`, host after); anything
+    ambiguous returns "" and is denied by the caller. It never DNS-resolves.
+    """
+    t = target.strip()
+    if "://" in t:              # strip a scheme (http://, https://, anything://)
+        t = t.split("://", 1)[1]
+    for sep in ("/", "?", "#"):  # authority ends at the first path/query/fragment separator
+        i = t.find(sep)
+        if i != -1:
+            t = t[:i]
+    if "@" in t:                # drop userinfo (user:pass@host) -> keep the real host
+        t = t.rsplit("@", 1)[1]
+    if t.startswith("["):       # bracketed IPv6, optionally with a port: [::1]:443
+        end = t.find("]")
+        return t[1:end] if end != -1 else ""
+    if t.count(":") > 1:        # bare IPv6 (can't carry a port without brackets) -> leave intact
+        return t
+    if ":" in t:                # host:port -> strip a numeric port only
+        host, _, port = t.rpartition(":")
+        return host if port.isdigit() else t
+    return t
+
+
 def _domain_in_scope(target: str, domains: list[str]) -> bool:
     host = target.lower().rstrip(".")
     for allowed in domains:
@@ -113,14 +142,20 @@ def authorize(
             return Decision(True, "artifact in allowed paths")
         return Decision(False, "artifact not in any allowed path")
 
-    if is_ip(target):
-        if _target_in_cidrs(target, scope.allowed_cidrs):
+    # Peel a URL scheme / port / path off the target so an in-scope host still authorizes when a tool
+    # addresses it as `http://host/...` or `host:port`. The host is the authorization boundary.
+    host = _target_host(target)
+    if not host:
+        return Decision(False, "target has no resolvable host")
+
+    if is_ip(host):
+        if _target_in_cidrs(host, scope.allowed_cidrs):
             return Decision(True, "ip in allowed cidr")
         return Decision(False, "ip not in any allowed cidr")
 
     # Anything non-IP is treated as a hostname and checked against the domain allowlist only.
     # We deliberately do not DNS-resolve here: resolution could point outside scope and is not
     # authorization-relevant. Tools that need an IP resolve inside the sandbox and re-check.
-    if _domain_in_scope(target, scope.allowed_domains):
+    if _domain_in_scope(host, scope.allowed_domains):
         return Decision(True, "host in allowed domain")
     return Decision(False, "host not in any allowed domain")
