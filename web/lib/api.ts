@@ -55,17 +55,41 @@ export type RunOptions = {
   intensity?: string;
   mode?: "scan" | "agent";
   objective?: string;
+  // Agent-mode tool library: the subset of tools the planner may use. Omit/empty = all tools.
+  enabledTools?: string[];
 };
 
 export function createRun(engagementId: string, opts: RunOptions) {
-  const { target, tool = "nmap", intensity = "light", mode = "scan", objective } = opts;
+  const { target, tool = "nmap", intensity = "light", mode = "scan", objective, enabledTools } = opts;
   const body =
-    mode === "agent" ? { target, mode, objective: objective || null } : { target, tool, intensity, mode };
+    mode === "agent"
+      ? {
+          target,
+          mode,
+          objective: objective || null,
+          // Only send a selection when the operator narrowed it; empty/undefined means "all".
+          enabled_tools: enabledTools && enabledTools.length ? enabledTools : null,
+        }
+      : { target, tool, intensity, mode };
   return fetch(`${BASE}/engagements/${engagementId}/runs`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   }).then(json<{ id: string; status: string }>);
+}
+
+// ---- tool library (agent-mode tool selection) ----
+
+export type Tool = {
+  name: string;
+  description: string;
+  surface: string; // network | artifact | knowledge
+  requires_flag: string | null; // offensive tools also need a signed-scope flag
+  mcp: boolean;
+};
+
+export function listTools() {
+  return fetch(`${BASE}/tools`, { cache: "no-store" }).then(json<Tool[]>);
 }
 
 // ---- live run events (chat interface) ----
