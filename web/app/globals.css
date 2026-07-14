@@ -386,3 +386,40 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 
 /* Uncapped transcript: show the entire run as one flowing chat (page scrolls instead of an inner box). */
 .chat.chat-full { max-height: none; }
+
+/* ---- Interactive chat: the agent's questions and the operator's replies ---- */
+.chat .msg.ask {
+  border-color: var(--brand-ring);
+  background: rgba(52, 229, 122, 0.06);
+  border-left: 3px solid var(--brand);
+}
+.chat .msg.ask .who { color: var(--brand); }
+.chat .msg.ask.ask-permission {
+  border-color: rgba(255, 176, 32, 0.5);
+  background: rgba(255, 176, 32, 0.07);
+  border-left-color: var(--medium);
+}
+.chat .msg.ask.ask-permission .who { color: var(--medium); }
+.ask-action { margin-top: 6px; font-size: 12.5px; color: var(--text-muted); }
+
+/* Operator replies read as the "other side" of the conversation: aligned right, brand-tinted. */
+.chat .msg.user-reply {
+  align-self: flex-end; max-width: 80%;
+  background: var(--brand-soft); border-color: var(--brand-ring);
+}
+.chat .msg.user-reply .who { color: var(--brand); text-align: right; }
+.chat .msg.user-reply.auto { align-self: stretch; background: var(--surface-2); border-style: dashed; }
+.chat .msg.user-reply.auto .who { color: var(--text-dim); text-align: left; }
+
+/* Composer: the reply box under the transcript. Dim until the agent asks, then it lights up. */
+.composer {
+  margin-top: 10px; padding: 12px 14px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--surface);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.composer.active { border-color: var(--brand-ring); box-shadow: 0 0 0 3px var(--brand-soft); }
+.composer-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+  font-size: 12.5px; color: var(--brand); font-family: var(--mono);
+}
+.composer-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }

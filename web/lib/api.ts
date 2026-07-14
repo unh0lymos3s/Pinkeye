@@ -104,7 +104,9 @@ export type RunEventKind =
   | "status"
   | "memory_delta"
   | "refusal"
-  | "error";
+  | "error"
+  | "ask" // the agent is asking the operator (permission / recommendation / question)
+  | "user_reply"; // the operator's reply, echoed into the transcript
 
 export type RunEvent = {
   engagement_id: string;
@@ -124,6 +126,16 @@ export function fetchTranscript(runId: string) {
 // URL for an EventSource(SSE) live tail; `after` resumes from the last seq seen (reconnect/replay).
 export function runEventsUrl(runId: string, after = 0) {
   return `${BASE}/runs/${runId}/events?after=${after}`;
+}
+
+// Send the operator's reply to a run waiting on an `ask_user` prompt (the interactive chat's
+// reverse channel). Guidance/permission only — it can never widen the run's authorized scope.
+export function sendReply(runId: string, text: string) {
+  return fetch(`${BASE}/runs/${runId}/reply`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text }),
+  }).then(json<{ ok: boolean }>);
 }
 
 // ---- cross-run network memory ----

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from app.audit import AuditSink
 from app.models import Engagement, Intensity, Run, RunStatus
 
-from .llm.base import LLMProvider, Message
+from .llm.base import LLMProvider, Message, ToolSpec
 from .llm.refusal import is_refusal
 from .orchestrator import execute_tool_step
 from .pipeline import STAGES, stage_of
@@ -24,8 +24,46 @@ DEFAULT_MISSION = (
     "You are a penetration-testing planning agent. Discover the attack surface of the target and "
     "identify vulnerabilities using the available tools. Call one tool at a time, read the result, "
     "then decide the next step. Stay within the authorized scope; if a call is denied, pick a "
-    "different in-scope action. When you have covered the surface, stop and summarize."
+    "different in-scope action. When you have covered the surface, stop and summarize.\n\n"
+    "You can talk to the human operator with the `ask_user` tool, which pauses the run and returns "
+    "their reply. You MUST call `ask_user` with kind=\"permission\" to get an explicit go-ahead "
+    "before any intrusive step — anything in the exploitation or credentials stages (exploit, "
+    "post_exploit, credential_attack). Do not launch an intrusive tool until the operator approves. "
+    "Use kind=\"recommendation\" to propose a next action and let the operator steer, and "
+    "kind=\"question\" for anything else you need from them. Recon, dynamic (DAST) and static (SAST) "
+    "scanning do not need approval — run those autonomously within scope."
 )
+
+# The operator-conversation tool. It is not a sandbox tool: the agent loop handles it inline by
+# emitting an `ask` event and blocking on the run inbox for the reply. Always offered to the model
+# (independent of the tool-library selection) so it can always reach the human.
+ASK_USER_SPEC = ToolSpec(
+    name="ask_user",
+    description=(
+        "Pause and ask the human operator a question in the chat, then wait for their reply. Use "
+        "kind='permission' to request an explicit approve/deny before an intrusive/exploitation "
+        "step (REQUIRED before exploit, post_exploit, or credential_attack); kind='recommendation' "
+        "to propose a next action; kind='question' for anything else. The operator's reply is "
+        "returned to you as the result."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "description": "What to ask the operator, in plain language."},
+            "kind": {
+                "type": "string",
+                "enum": ["permission", "recommendation", "question"],
+                "description": "permission = needs approve/deny; recommendation = suggest an action; question = free-form.",
+            },
+            "action": {"type": "string", "description": "The specific next action you propose to take, if any."},
+        },
+        "required": ["question"],
+    },
+)
+
+# How long the run thread blocks waiting for an operator reply before proceeding autonomously (and
+# never taking an intrusive action, since that still needs approval). Read from the env at call time.
+DEFAULT_ASK_TIMEOUT_SECONDS = 600
 
 
 @dataclass
@@ -102,6 +140,7 @@ def run_agent(
     context: dict | None = None,
     events=None,
     memory=None,
+    inbox=None,
 ) -> AgentResult:
     budget = budget or Budget.from_env()
     result = AgentResult()
@@ -143,7 +182,9 @@ def run_agent(
     ]
     if known_map:
         messages.insert(1, Message(role="system", content=known_map))
-    specs = registry.specs()
+    # Always offer ask_user alongside the (possibly narrowed) tool set so the agent can reach the
+    # operator regardless of the tool-library selection.
+    specs = [*registry.specs(), ASK_USER_SPEC]
 
     # Surface a refusal-aware provider's reinforce/fallback transitions into the event stream.
     if hasattr(provider, "on_refusal"):
@@ -176,8 +217,12 @@ def run_agent(
 
         messages.append(Message(role="assistant", content=resp.text, tool_calls=resp.tool_calls))
         for tc in resp.tool_calls:
-            summary = _run_one(engagement, run, tc, registry, sandbox, graph, audit, db, result,
-                               context, emit, memory)
+            if tc.name == "ask_user":
+                # Interactive step: emit the question, block for the operator's reply, feed it back.
+                summary = _ask_user(engagement, run, tc, emit, inbox)
+            else:
+                summary = _run_one(engagement, run, tc, registry, sandbox, graph, audit, db, result,
+                                   context, emit, memory)
             messages.append(Message(role="tool", content=summary, tool_call_id=tc.id))
             result.tool_calls_used += 1
 
@@ -225,6 +270,30 @@ def _known_map_message(memory, engagement_id: str) -> str:
     if changes:
         lines.append("Changes since last run: " + "; ".join(str(c) for c in changes[:20]))
     return "\n".join(lines)
+
+
+def _ask_user(engagement, run, tc, emit, inbox) -> str:
+    """Handle an `ask_user` call: emit the question, block the run thread on the inbox for the
+    operator's reply, echo it into the transcript, and return it to the model. On timeout (or with no
+    inbox wired), proceed autonomously — but the model is told not to take intrusive actions unasked."""
+    args = tc.arguments or {}
+    question = str(args.get("question", "")).strip() or "Awaiting your input."
+    kind = str(args.get("kind", "question")).strip() or "question"
+    action = args.get("action")
+    emit("ask", question=question, kind=kind, action=action)
+
+    timeout = _env_int("EYE_AGENT_ASK_TIMEOUT", DEFAULT_ASK_TIMEOUT_SECONDS)
+    reply = inbox.wait(run.id, timeout) if inbox is not None else None
+    if reply is None or not str(reply).strip():
+        note = (
+            "(operator did not respond — proceeding autonomously within authorized scope; do NOT "
+            "run any intrusive/exploitation tool without explicit approval)"
+        )
+        emit("user_reply", text=note, auto=True)
+        return note
+    reply = str(reply).strip()
+    emit("user_reply", text=reply)
+    return f"Operator replied: {reply}"
 
 
 def _run_one(engagement, run, tc, registry, sandbox, graph, audit, db, result, context, emit, memory) -> str:

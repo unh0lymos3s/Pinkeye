@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from .audit import MemoryAuditSink, PostgresAuditSink
 from .auth import Authenticator, Principal, has_role
 from .config import settings
-from .events import RunEventStore
+from .events import RunEventStore, RunInbox
 from .memory import NetworkMemory
 from .correlation import correlate
 from .db.database import Database
@@ -75,6 +75,9 @@ limiter = RateLimiter()
 # Live run-event stream powering the chat interface. Best-effort persisted to Postgres (migration
 # 0006) with an in-memory ring buffer as the fast path for SSE tailing + reconnect.
 run_events = RunEventStore(db)
+# Reverse channel for the interactive chat: carries an operator's reply from POST /runs/{id}/reply
+# into the run's background thread, which blocks inside the agent's ask_user tool.
+run_inbox = RunInbox()
 
 # Cross-run network memory (the "brain"): the durable, differential map fed back to the agent and
 # surfaced to the UI. Backed by Neo4j (topology) + Postgres (audit-grade diff log). It can never
@@ -303,7 +306,7 @@ def create_run(engagement_id: str, body: CreateRun, background: BackgroundTasks,
             if body.mode == "agent":
                 run_agent(eng, run, get_provider("planner"), ToolRegistry(planner_tools),
                           sandbox, graph, audit, persistence, mission=mission, context=context,
-                          events=run_events, memory=memory)
+                          events=run_events, memory=memory, inbox=run_inbox)
             else:
                 run_scan(eng, run, tool, body.intensity, sandbox, graph, audit, persistence, context,
                          memory=memory)
@@ -349,6 +352,23 @@ def run_transcript(run_id: str):
     """Full ordered transcript of a run's events, for replay and reconnect. A client reconnecting
     fetches this, renders it, then tails /events?after=<last seq> for anything newer."""
     return {"events": [e.model_dump(mode="json") for e in run_events.all_events(run_id)]}
+
+
+class RunReply(BaseModel):
+    text: str
+
+
+@app.post("/runs/{run_id}/reply")
+def run_reply(run_id: str, body: RunReply):
+    """Deliver the operator's chat reply to a run waiting on an `ask_user` prompt. Guidance/permission
+    only — it re-enters the planner as a tool result and can never widen scope; the scope guard and
+    offensive-flag gate still decide what any subsequent tool call may do. Delivery is fire-and-forget:
+    if the run isn't currently waiting, the message queues until its next ask (or is harmlessly unused)."""
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "reply text is required")
+    run_inbox.deliver(run_id, text)
+    return {"ok": True}
 
 
 @app.get("/runs/{run_id}/events")

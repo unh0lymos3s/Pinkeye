@@ -14,6 +14,7 @@ import {
   fetchTranscript,
   listTools,
   runEventsUrl,
+  sendReply,
   type RunEvent,
   type Tool,
 } from "../../lib/api";
@@ -69,6 +70,10 @@ export default function AgentChat() {
   // means "not yet loaded"; once tools arrive we default to every tool checked.
   const [tools, setTools] = useState<Tool[]>([]);
   const [enabled, setEnabled] = useState<Set<string> | null>(null);
+
+  // Interactive chat: the operator's reply draft while the agent is waiting on an ask_user prompt.
+  const [reply, setReply] = useState("");
+  const [sending, setSending] = useState(false);
 
   const esRef = useRef<EventSource | null>(null);
   const lastSeqRef = useRef(0);
@@ -159,6 +164,22 @@ export default function AgentChat() {
       setStatus(`error: ${String(e)}`);
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Send the operator's reply to a waiting ask_user prompt. The backend echoes it back as a
+  // `user_reply` event over SSE, so we don't optimistically insert it — we just clear the draft.
+  async function submitReply(text: string) {
+    const t = text.trim();
+    if (!t || !runId || sending) return;
+    setSending(true);
+    try {
+      await sendReply(runId, t);
+      setReply("");
+    } catch (e) {
+      setStatus(`reply failed: ${String(e)}`);
+    } finally {
+      setSending(false);
     }
   }
 
@@ -322,7 +343,92 @@ export default function AgentChat() {
         ))}
         <div ref={bottomRef} />
       </div>
+
+      <Composer
+        pendingAsk={view.pendingAsk}
+        reply={reply}
+        setReply={setReply}
+        sending={sending}
+        onSend={submitReply}
+        hasRun={!!runId}
+      />
     </main>
+  );
+}
+
+// The chat's reverse channel: a reply box the operator uses to answer the agent's ask_user prompts.
+// It lights up while a prompt is pending, and offers Approve/Deny shortcuts for permission requests.
+function Composer({
+  pendingAsk,
+  reply,
+  setReply,
+  sending,
+  onSend,
+  hasRun,
+}: {
+  pendingAsk: RunEvent | null;
+  reply: string;
+  setReply: (v: string) => void;
+  sending: boolean;
+  onSend: (text: string) => void;
+  hasRun: boolean;
+}) {
+  const waiting = !!pendingAsk;
+  const kind = pendingAsk?.data?.kind || "question";
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Focus the box as soon as the agent asks, so the operator can just start typing.
+  useEffect(() => {
+    if (waiting) inputRef.current?.focus();
+  }, [waiting, pendingAsk?.seq]);
+
+  if (!hasRun) return null;
+
+  const placeholder = waiting
+    ? kind === "permission"
+      ? "Approve or deny — or type an instruction…"
+      : "Type your reply to the agent…"
+    : "The agent will prompt you here when it needs a decision.";
+
+  return (
+    <div className={`composer${waiting ? " active" : ""}`}>
+      {waiting && (
+        <div className="composer-head">
+          <span className="beat" />
+          the agent is waiting on your {kind === "permission" ? "approval" : "reply"}
+        </div>
+      )}
+      <div className="composer-row">
+        <input
+          ref={inputRef}
+          className="input"
+          style={{ flex: 1 }}
+          value={reply}
+          disabled={!waiting || sending}
+          placeholder={placeholder}
+          onChange={(e) => setReply(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              onSend(reply);
+            }
+          }}
+        />
+        {waiting && kind === "permission" && (
+          <>
+            <button className="btn" onClick={() => onSend("Approved — proceed.")} disabled={sending}>
+              ✓ Approve
+            </button>
+            <button className="btn" onClick={() => onSend("Denied — do not run that. Continue with non-intrusive steps.")} disabled={sending}>
+              ✕ Deny
+            </button>
+          </>
+        )}
+        <button className="btn btn-primary" onClick={() => onSend(reply)} disabled={!waiting || sending || !reply.trim()}>
+          {sending ? "Sending…" : "Send"}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -477,7 +583,21 @@ function derive(events: RunEvent[]) {
   if (running && runningEv) activity = `▶ running ${runningEv.data.tool} on ${runningEv.data.target}…`;
   else if (thinking) activity = "◍ thinking…";
 
-  const statusLabel = terminal ? `run ${lastStatus}` : lastStatus ? "running" : "";
+  // Interactive: an ask_user prompt is "pending" while it has no reply after it and the run is live.
+  const askEvents = events.filter((e) => e.kind === "ask");
+  const replyEvents = events.filter((e) => e.kind === "user_reply");
+  const lastAsk = askEvents[askEvents.length - 1];
+  const lastReplySeq = replyEvents.length ? replyEvents[replyEvents.length - 1].seq : 0;
+  const pendingAsk = lastAsk && lastAsk.seq > lastReplySeq && !terminal ? lastAsk : null;
+
+  const statusLabel = terminal
+    ? `run ${lastStatus}`
+    : pendingAsk
+    ? "awaiting your input"
+    : lastStatus
+    ? "running"
+    : "";
+  if (pendingAsk && !activity) activity = "◍ waiting for your reply…";
 
   return {
     stages,
@@ -492,6 +612,7 @@ function derive(events: RunEvent[]) {
     stageIndex,
     activity,
     status: statusLabel,
+    pendingAsk,
   };
 }
 
@@ -568,6 +689,30 @@ function Bubble({ ev }: { ev: RunEvent }) {
             {d.change === "newly_exploitable" ? "⚠ exploitable" : `Δ ${d.change}`}
           </span>
           <div className="body">{d.label || d.key}</div>
+        </div>
+      );
+    case "ask": {
+      const kind = d.kind || "question";
+      const glyph = kind === "permission" ? "🔒" : kind === "recommendation" ? "💡" : "❔";
+      return (
+        <div className={`msg ask ask-${kind}`}>
+          <span className="who">
+            {glyph} agent needs you · {kind}
+          </span>
+          <div className="body">{d.question}</div>
+          {d.action && (
+            <div className="ask-action">
+              proposed action: <span className="mono">{d.action}</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+    case "user_reply":
+      return (
+        <div className={`msg user-reply${d.auto ? " auto" : ""}`}>
+          <span className="who">{d.auto ? "⏱ no reply" : "🧑 you"}</span>
+          <div className="body">{d.text}</div>
         </div>
       );
     case "refusal": {
