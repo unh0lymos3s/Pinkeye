@@ -1,4 +1,4 @@
-// Codename Eye — Neo4j schema (constraints + indexes).
+// Pinkeye — Neo4j schema (constraints + indexes).
 // Applied once at stack startup. Uniqueness keys keep the graph deduplicated as tools re-report
 // the same hosts, ports, and findings across runs.
 

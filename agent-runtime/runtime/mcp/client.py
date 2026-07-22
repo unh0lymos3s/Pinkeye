@@ -19,7 +19,7 @@ import threading
 from typing import Any
 
 PROTOCOL_VERSION = "2025-06-18"
-_CLIENT_INFO = {"name": "codename-eye", "version": "0.1.0"}
+_CLIENT_INFO = {"name": "pinkeye", "version": "0.1.0"}
 
 
 class MCPError(RuntimeError):

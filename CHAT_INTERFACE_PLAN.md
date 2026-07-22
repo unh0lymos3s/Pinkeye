@@ -1,8 +1,8 @@
-# Codename Eye — Chat Interface + Memory Engine Implementation Plan
+# Pinkeye — Chat Interface + Memory Engine Implementation Plan
 
 > ## ⛔ CONFIDENTIAL — ETHICAL SECURITY RESEARCH ONLY
 >
-> **This tool and this document are highly confidential.** Codename Eye is an offensive security
+> **This tool and this document are highly confidential.** Pinkeye is an offensive security
 > harness intended **exclusively for authorized, ethical security research** — assets you own or are
 > contracted in writing to test. It is released under **highly controlled use** and must never be
 > distributed, deployed, or operated outside that boundary. Every run is bound to a **signed scope**

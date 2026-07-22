@@ -1,4 +1,4 @@
-# Codename Eye
+# Pinkeye
 
 AI-powered DAST/SAST vulnerability-assessment and red-team harness. A deterministic control plane
 wraps a swappable LLM so tool execution, sandbox isolation, scope enforcement, scoring, and

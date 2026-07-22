@@ -233,7 +233,7 @@ export default function AgentChat() {
 
       <div style={{ margin: "18px 0" }}>
         <Callout kind="danger">
-          <strong>Authorized, controlled use only.</strong> Codename Eye is for ethical security
+          <strong>Authorized, controlled use only.</strong> Pinkeye is for ethical security
           research on assets you own or are contracted in writing to test. Every tool call is checked
           against the engagement's signed scope before it runs — the objective below is guidance, not
           authorization, and cannot widen scope.

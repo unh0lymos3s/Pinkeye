@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Callout, SectionTitle } from "../ui";
 import { API_BASE } from "../../lib/api";
 
-export const metadata = { title: "Guide · Codename Eye" };
+export const metadata = { title: "Guide · Pinkeye" };
 
 const TOOLS: { name: string; kind: string; what: string; gated?: boolean }[] = [
   { name: "nmap", kind: "Recon", what: "Host discovery and port/service scanning." },
@@ -49,7 +49,7 @@ export default function Guide() {
         <div>
           <h1>User Guide</h1>
           <p className="page-sub">
-            How Codename Eye works and how to drive it — from a scoped engagement to a finished report.
+            How Pinkeye works and how to drive it — from a scoped engagement to a finished report.
           </p>
         </div>
       </div>
@@ -65,7 +65,7 @@ export default function Guide() {
 
       <SectionTitle>What this is</SectionTitle>
       <p className="muted">
-        Codename Eye is an AI-assisted DAST/SAST vulnerability-assessment and red-team harness. A
+        Pinkeye is an AI-assisted DAST/SAST vulnerability-assessment and red-team harness. A
         deterministic control plane wraps a swappable LLM so tool execution, sandbox isolation, scope
         enforcement, scoring, and correlation stay reliable regardless of which model is plugged in. The
         LLM plans and triages; the harness keeps it safe, reproducible, and auditable. Findings are

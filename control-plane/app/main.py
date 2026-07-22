@@ -52,7 +52,7 @@ from runtime.sandbox import DockerSandbox
 from runtime.subagents import SPECIALISTS, specialist_mission, specialist_registry
 from runtime.toolset import all_tools, select_tools
 
-app = FastAPI(title="Codename Eye — Control Plane")
+app = FastAPI(title="Pinkeye — Control Plane")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )

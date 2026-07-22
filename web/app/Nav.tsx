@@ -19,7 +19,7 @@ export default function Nav() {
     <nav className="nav">
       <Link href="/" className="brand" style={{ textDecoration: "none", color: "var(--text)" }}>
         <span className="eye">◉</span>
-        <span className="name">Codename Eye</span>
+        <span className="name">Pinkeye</span>
       </Link>
       {LINKS.map((l) => {
         const active = l.href === "/" ? path === "/" : path.startsWith(l.href);

@@ -1,6 +1,6 @@
 # Integrated Tools & Services
 
-An inventory of every external tool, model provider, and backing service wired into **Codename Eye**.
+An inventory of every external tool, model provider, and backing service wired into **Pinkeye**.
 
 > Note: The LLM plans over a fixed in-harness tool registry (`agent-runtime/runtime/registry.py`),
 > and every tool is offered to the model with the same `{target, intensity}` shape. The model picks
