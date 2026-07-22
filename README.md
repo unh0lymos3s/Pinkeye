@@ -1,10 +1,6 @@
-# Codename Eye
+# Pinkeye
 
-AI-powered DAST/SAST vulnerability-assessment and red-team harness. A deterministic control plane
-wraps a swappable LLM so tool execution, sandbox isolation, scope enforcement, scoring, and
-correlation stay reliable regardless of which model is plugged in. The LLM plans and triages; the
-harness keeps it safe, reproducible, and auditable. Findings are rendered as a knowledge graph with a
-dashboard, a queryable API, and a Markdown report.
+Read the description, its a wrapper I just designed it Claude wrote the code. AI slop begins down below:
 
 > ⚠️ **Authorized use only.** Only run against assets you own or are contracted to test. Every run is
 > bound to a **signed scope** the harness enforces in code before any tool executes. Intrusive
