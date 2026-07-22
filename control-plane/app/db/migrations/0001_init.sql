@@ -1,4 +1,4 @@
--- Codename Eye system-of-record. Postgres is the durable memory: engagements, runs, findings, and
+-- Pinkeye system-of-record. Postgres is the durable memory: engagements, runs, findings, and
 -- discovered services persist here across restarts and power the dashboard KPIs and query API.
 -- Neo4j holds the same facts as a graph for the network map; this is the relational mirror.
 

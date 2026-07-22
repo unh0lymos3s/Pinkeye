@@ -73,3 +73,39 @@ def test_out_of_scope_run_is_rejected_before_tool_runs():
     assert result.status == RunStatus.rejected
     assert graph.findings == []  # nothing was scanned or written
     assert any(e.type == EventType.scope_decision and e.allowed is False for e in audit.events)
+
+
+class RecordingMemory:
+    """Captures observe() calls so we can assert single-tool scans feed the cross-run map too."""
+
+    def __init__(self):
+        self.calls = []
+
+    def observe(self, engagement_id, run_id, services, findings):
+        self.calls.append((engagement_id, run_id, list(services), list(findings)))
+        return None
+
+
+def test_in_scope_scan_feeds_network_memory():
+    eng = make_engagement()
+    run = Run(id="r3", engagement_id="e1", target="10.0.0.5")
+    memory = RecordingMemory()
+
+    run_scan(eng, run, NmapTool(), Intensity.light,
+             FakeSandbox(SAMPLE_XML.encode()), FakeGraph(), MemoryAuditSink(), memory=memory)
+
+    assert len(memory.calls) == 1
+    engagement_id, run_id, services, findings = memory.calls[0]
+    assert engagement_id == "e1" and run_id == "r3"
+    assert services and findings  # the scan's observations were handed to the memory engine
+
+
+def test_rejected_scan_does_not_touch_memory():
+    eng = make_engagement(cidr="192.168.0.0/24")  # 10.0.0.5 is out of scope
+    run = Run(id="r4", engagement_id="e1", target="10.0.0.5")
+    memory = RecordingMemory()
+
+    run_scan(eng, run, NmapTool(), Intensity.light,
+             FakeSandbox(SAMPLE_XML.encode()), FakeGraph(), MemoryAuditSink(), memory=memory)
+
+    assert memory.calls == []  # denied before execution, so nothing is observed

@@ -1,4 +1,4 @@
-// Codename Eye — Neo4j schema (constraints + indexes).
+// Pinkeye — Neo4j schema (constraints + indexes).
 // Applied once at stack startup. Uniqueness keys keep the graph deduplicated as tools re-report
 // the same hosts, ports, and findings across runs.
 
@@ -29,3 +29,14 @@ CREATE INDEX finding_engagement IF NOT EXISTS
 
 CREATE INDEX ip_engagement IF NOT EXISTS
   FOR (i:IP) ON (i.engagement_id);
+
+// Cross-run memory: index the bookkeeping the memory engine diffs on. No new uniqueness keys — the
+// MERGE keys are unchanged, so nothing duplicates; these only speed up "what changed" / status reads.
+CREATE INDEX ip_status IF NOT EXISTS
+  FOR (i:IP) ON (i.status);
+
+CREATE INDEX ip_last_run IF NOT EXISTS
+  FOR (i:IP) ON (i.last_run_id);
+
+CREATE INDEX service_last_run IF NOT EXISTS
+  FOR (s:Service) ON (s.last_run_id);

@@ -31,16 +31,40 @@ services:
       EYE_POSTGRES_DSN: postgresql://eye:eye@postgres:5432/eye
       # Override in any real deployment; the scope guard's signatures depend on it.
       EYE_SCOPE_SIGNING_KEY: dev-insecure-signing-key
+      # Ollama Cloud (direct): the containers call Ollama's cloud API over the internet, so no host
+      # Ollama and no firewall/binding issues. Needs an API key from https://ollama.com/settings/keys
+      # exported as OLLAMA_API_KEY before `up`. Keep in sync with `worker`.
+      EYE_LLM_PROVIDER: openai
+      EYE_LLM_MODEL: minimax-m3:cloud
+      EYE_LLM_BASE_URL: https://ollama.com/v1
+      EYE_LLM_API_KEY: ${OLLAMA_API_KEY:-}
+      EYE_LLM_TIMEOUT: "60"
+      # Optional: a stronger backstop if the primary refuses an authorized step (needs its key).
+      # EYE_LLM_FALLBACK_MODELS: "claude:claude-fable-5"
+      # SAST slot via the *pooled* Snyk MCP server: the `semgrep` tool routes to a warm, locked-down
+      # `eye-mcp-snyk` sibling container (run by the connection pool), not an in-process subprocess.
+      # SNYK_TOKEN (from deploy/.env) is forwarded by name into that sibling; the source root is
+      # bind-mounted read-only at /samples inside it (host path via EYE_SRC_ROOT). Build the image with
+      # `docker compose build mcp-snyk` before first use.
+      SNYK_TOKEN: ${SNYK_TOKEN:-}
+      EYE_SRC_ROOT: ${EYE_SRC_ROOT:-/samples}
+      # Root for codebases uploaded via the SAST tab. It is bind-mounted at the SAME absolute path on
+      # the host and in this container (below), and read-only into the Snyk sibling (mounts), so an
+      # extracted path means the same thing to the api, the disposable sandbox, and the MCP server.
+      EYE_UPLOAD_ROOT: /eye-uploads
+      EYE_MCP_SERVERS: '{"semgrep":{"pooled":true,"image":"eye-mcp-snyk:latest","tool":"snyk_code_scan","target_arg":"path","env":{"SNYK_TOKEN":"${SNYK_TOKEN:-}"},"mounts":["${EYE_SRC_ROOT:-/samples}:/samples:ro","/eye-uploads:/eye-uploads:ro"]}}'
     ports:
       - "9000:9000"
     depends_on:
       - neo4j
       - postgres
-    # The API launches disposable sandbox containers on the host's Docker daemon.
-    # This socket mount is a known Phase 1 trade-off; Phase 6 replaces it with a brokered,
-    # rootless runner so the API never holds full daemon access.
+    # The API launches disposable sandbox containers AND the pooled MCP sibling on the host's Docker
+    # daemon. This socket mount is a known Phase 1 trade-off; Phase 6 replaces it with a brokered,
+    # rootless runner so the API never holds full daemon access. The uploads bind mount uses an
+    # identical host:container path so a SAST target the api extracts is bind-mountable by the daemon.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /eye-uploads:/eye-uploads
 
   # Scan worker: drains the durable job queue. Scale with `docker compose up --scale worker=N`.
   worker:
@@ -53,11 +77,33 @@ services:
       EYE_NEO4J_PASSWORD: eye-dev-password
       EYE_POSTGRES_DSN: postgresql://eye:eye@postgres:5432/eye
       EYE_SCOPE_SIGNING_KEY: dev-insecure-signing-key
+      # Mirrors the api service — the worker also calls get_provider(). Ollama Cloud (direct).
+      EYE_LLM_PROVIDER: openai
+      EYE_LLM_MODEL: minimax-m3:cloud
+      EYE_LLM_BASE_URL: https://ollama.com/v1
+      EYE_LLM_API_KEY: ${OLLAMA_API_KEY:-}
+      EYE_LLM_TIMEOUT: "60"
+      # EYE_LLM_FALLBACK_MODELS: "claude:claude-fable-5"
+      # Mirror the api service so job-queue runs also use the pooled Snyk MCP SAST backend.
+      SNYK_TOKEN: ${SNYK_TOKEN:-}
+      EYE_SRC_ROOT: ${EYE_SRC_ROOT:-/samples}
+      EYE_UPLOAD_ROOT: /eye-uploads
+      EYE_MCP_SERVERS: '{"semgrep":{"pooled":true,"image":"eye-mcp-snyk:latest","tool":"snyk_code_scan","target_arg":"path","env":{"SNYK_TOKEN":"${SNYK_TOKEN:-}"},"mounts":["${EYE_SRC_ROOT:-/samples}:/samples:ro","/eye-uploads:/eye-uploads:ro"]}}'
     depends_on:
       - neo4j
       - postgres
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /eye-uploads:/eye-uploads
+
+  # Build-only: produces the hardened Snyk MCP server image the pool launches as a sibling. It is not
+  # started by `up` (the pool runs it on demand); build it with `docker compose build mcp-snyk`.
+  mcp-snyk:
+    build:
+      context: ..
+      dockerfile: deploy/mcp-snyk.Dockerfile
+    image: eye-mcp-snyk:latest
+    profiles: ["mcp-images"]
 
   web:
     build:
@@ -71,6 +117,10 @@ services:
       - "3000:3000"
     depends_on:
       - api
+
+  # NOTE: No Ollama service here — the api/worker call Ollama Cloud directly at https://ollama.com/v1
+  # using OLLAMA_API_KEY (create one at https://ollama.com/settings/keys, `export OLLAMA_API_KEY=...`
+  # before `up`). To use a host Ollama instead, set EYE_LLM_PROVIDER=ollama + EYE_LLM_BASE_URL at it.
 
 volumes:
   neo4j-data:

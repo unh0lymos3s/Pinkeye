@@ -5,7 +5,15 @@ import { useEffect, useState } from "react";
 import GraphView from "./GraphView";
 import EngagementPicker from "./EngagementPicker";
 import { Callout, SectionTitle } from "./ui";
-import { createEngagement, createRun, fetchGraph, fetchMap, type Graph } from "../lib/api";
+import {
+  createEngagement,
+  createRun,
+  fetchChanges,
+  fetchGraph,
+  fetchMap,
+  type Graph,
+  type MemoryChanges,
+} from "../lib/api";
 import { useEngagement } from "../lib/useEngagement";
 
 // Deterministic single-tool scans the map view offers directly. Agent mode ignores this.
@@ -24,6 +32,24 @@ export default function Home() {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [full, setFull] = useState(false);
+  const [lastRunId, setLastRunId] = useState("");
+  const [changes, setChanges] = useState<MemoryChanges | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  // Fullscreen map: exit on Esc, and lock body scroll while the overlay is up.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFullscreen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [fullscreen]);
 
   // Poll the graph so new findings appear as scans land. Source depends on the "full map" toggle.
   useEffect(() => {
@@ -35,6 +61,21 @@ export default function Home() {
     const t = setInterval(tick, 3000);
     return () => clearInterval(t);
   }, [selected, full]);
+
+  // Poll the cross-run memory diff for the most recent run so "what changed since last run" fills in
+  // as the run's observations land. Cleared whenever the engagement or tracked run changes.
+  useEffect(() => {
+    if (!selected || !lastRunId) {
+      setChanges(null);
+      return;
+    }
+    const tick = () => {
+      fetchChanges(selected, lastRunId).then(setChanges).catch(() => {});
+    };
+    tick();
+    const t = setInterval(tick, 3000);
+    return () => clearInterval(t);
+  }, [selected, lastRunId]);
 
   async function onCreate() {
     if (!name.trim()) return;
@@ -62,6 +103,7 @@ export default function Home() {
     setStatus(mode === "agent" ? "launching agent run (scope-checked)…" : "launching scan (scope-checked)…");
     try {
       const run = await createRun(selected, { target, tool, intensity, mode });
+      setLastRunId(run.id);
       setStatus(`run ${run.id.slice(0, 8)} — ${run.status}`);
     } catch (e) {
       setStatus(`error: ${String(e)}`);
@@ -172,12 +214,24 @@ export default function Home() {
           <span className="live">
             {nodeCount > 0 && <span className="beat" />}
             {nodeCount} nodes · {edgeCount} edges
+            <button
+              className="mini-btn"
+              onClick={() => setFullscreen(true)}
+              title="Expand the map to fill the screen"
+            >
+              ⤢ Fullscreen
+            </button>
           </span>
         }
       >
         Knowledge graph
       </SectionTitle>
-      <div className="card" style={{ padding: 12 }}>
+      <div className={`card graph-card${fullscreen ? " graph-fullscreen" : ""}`} style={{ padding: 12 }}>
+        {fullscreen && (
+          <button className="mini-btn graph-fs-exit" onClick={() => setFullscreen(false)}>
+            ✕ Exit fullscreen (Esc)
+          </button>
+        )}
         <div className="legend" style={{ padding: "4px 6px 12px" }}>
           {[
             ["Engagement", "var(--node-engagement)"],
@@ -191,14 +245,90 @@ export default function Home() {
               {label}
             </span>
           ))}
+          {/* Cross-run memory badges rendered as rings by GraphView. */}
+          {[
+            ["⚠ exploitable", "#ffb020"],
+            ["new", "#34e57a"],
+            ["changed", "#ffb020"],
+            ["gone", "#5f7a66"],
+          ].map(([label, color]) => (
+            <span className="item" key={label}>
+              <span
+                className="swatch"
+                style={{ background: "transparent", boxShadow: `inset 0 0 0 2px ${color}` }}
+              />
+              {label}
+            </span>
+          ))}
         </div>
-        <GraphView graph={graph} />
-        {nodeCount === 0 && (
+        <GraphView graph={graph} fill={fullscreen} />
+        {nodeCount === 0 ? (
           <div className="dim" style={{ textAlign: "center", padding: "12px 0 4px", fontSize: 13 }}>
             No graph data yet — launch a run to populate hosts, ports, services, and findings.
           </div>
+        ) : (
+          <div className="dim" style={{ textAlign: "center", padding: "8px 0 2px", fontSize: 11.5 }}>
+            drag to pan · scroll to zoom · double-click to reset
+          </div>
         )}
       </div>
+
+      {lastRunId && <ChangesPanel changes={changes} />}
     </main>
+  );
+}
+
+// The cross-run memory diff for the most recent run: new/changed/gone topology and newly-exploitable
+// targets, so an operator sees at a glance what this run added over prior knowledge. Fed by the
+// /changes endpoint; the same deltas the agent chat surfaces inline.
+function ChangesPanel({ changes }: { changes: MemoryChanges | null }) {
+  const groups: [string, string, MemoryChanges["added"]][] = changes
+    ? [
+        ["Newly exploitable", "danger", changes.newly_exploitable],
+        ["New", "new", changes.added],
+        ["Changed", "changed", changes.changed],
+        ["Gone", "gone", changes.removed],
+      ]
+    : [];
+  const total = groups.reduce((n, [, , items]) => n + items.length, 0);
+  return (
+    <>
+      <SectionTitle
+        action={
+          <span className="live">
+            {total > 0 && <span className="beat" />}
+            {total} change{total === 1 ? "" : "s"}
+          </span>
+        }
+      >
+        Changes since last run
+      </SectionTitle>
+      <div className="card card-pad">
+        {total === 0 ? (
+          <div className="dim" style={{ fontSize: 13 }}>
+            {changes
+              ? "No topology changes recorded for the latest run — the map matched prior knowledge."
+              : "Waiting for the latest run's observations…"}
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {groups
+              .filter(([, , items]) => items.length > 0)
+              .map(([label, kind, items]) =>
+                items.map((c, i) => (
+                  <div
+                    key={`${label}-${c.key}-${i}`}
+                    className="row"
+                    style={{ alignItems: "center", gap: 8, fontSize: 13 }}
+                  >
+                    <span className={`change-tag change-${kind}`}>{label}</span>
+                    <span className="mono">{c.label || c.key}</span>
+                  </div>
+                ))
+              )}
+          </div>
+        )}
+      </div>
+    </>
   );
 }

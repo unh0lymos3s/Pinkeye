@@ -1,10 +1,10 @@
-# Codename Eye — Implementation Report
+# Pinkeye — Implementation Report
 
 _AI-powered DAST/SAST vulnerability-assessment and red-team harness._
 
 ## 1. Goal
 
-Codename Eye runs **authorized** vulnerability assessments (dynamic + static) and gated red-team
+Pinkeye runs **authorized** vulnerability assessments (dynamic + static) and gated red-team
 activity against targets the operator owns or is contracted to test, then represents everything it
 finds as a **knowledge graph** with a dashboard, a queryable API, and a Markdown report.
 
@@ -188,7 +188,7 @@ five migrations + the CVE seed package into the built wheel.
 
 ## 11. Authorization notice
 
-Codename Eye is for **authorized** security testing only — assets you own or have written permission
+Pinkeye is for **authorized** security testing only — assets you own or have written permission
 to test. The signed-scope requirement, the offensive-capability flags, sandboxing, rate limits, and
 audit trail are the technical expression of that rule. Operators are responsible for ensuring every
 engagement is properly authorized before enabling intrusive capabilities.

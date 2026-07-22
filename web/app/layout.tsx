@@ -3,7 +3,7 @@ import "./globals.css";
 import Nav from "./Nav";
 
 export const metadata = {
-  title: "Codename Eye",
+  title: "Pinkeye",
   description: "AI-powered DAST/SAST vulnerability-assessment and red-team harness.",
 };
 

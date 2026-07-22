@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Callout, SectionTitle } from "../ui";
 import { API_BASE } from "../../lib/api";
 
-export const metadata = { title: "Guide · Codename Eye" };
+export const metadata = { title: "Guide · Pinkeye" };
 
 const TOOLS: { name: string; kind: string; what: string; gated?: boolean }[] = [
   { name: "nmap", kind: "Recon", what: "Host discovery and port/service scanning." },
@@ -49,7 +49,7 @@ export default function Guide() {
         <div>
           <h1>User Guide</h1>
           <p className="page-sub">
-            How Codename Eye works and how to drive it — from a scoped engagement to a finished report.
+            How Pinkeye works and how to drive it — from a scoped engagement to a finished report.
           </p>
         </div>
       </div>
@@ -65,7 +65,7 @@ export default function Guide() {
 
       <SectionTitle>What this is</SectionTitle>
       <p className="muted">
-        Codename Eye is an AI-assisted DAST/SAST vulnerability-assessment and red-team harness. A
+        Pinkeye is an AI-assisted DAST/SAST vulnerability-assessment and red-team harness. A
         deterministic control plane wraps a swappable LLM so tool execution, sandbox isolation, scope
         enforcement, scoring, and correlation stay reliable regardless of which model is plugged in. The
         LLM plans and triages; the harness keeps it safe, reproducible, and auditable. Findings are
@@ -128,6 +128,74 @@ export default function Guide() {
         </div>
       </div>
 
+      <SectionTitle>Running an assessment: code → dynamic → exploitation</SectionTitle>
+      <p className="muted" style={{ marginBottom: 4 }}>
+        The recommended path is <strong>Agent</strong> mode on the{" "}
+        <Link href="/agent" className="tag" style={{ textDecoration: "none" }}>Agent Chat</Link> page. Use the{" "}
+        <strong>Tools</strong> dropdown there to enable exactly the tools for the phase you want — the pipeline
+        rail dims the phases you switch off — then set the target and launch. The agent runs non-intrusive
+        phases on its own and <strong>pauses to ask you in the chat</strong> before anything intrusive.
+      </p>
+
+      <div className="card card-pad" style={{ marginTop: 8 }}>
+        <Step n={1} title="Code analysis (SAST) — scan source, dependencies, and secrets">
+          Point the target at an <strong>authorized source artifact</strong> — a repository path or checkout
+          mounted for the harness (the pooled Snyk-backed scanner reads from <code className="k">EYE_SRC_ROOT</code>).
+          In the Tools dropdown keep the <span className="badge pill">SAST</span> tools enabled:{" "}
+          <code className="k">semgrep</code> (static code analysis for injection, authz, and unsafe APIs),{" "}
+          <code className="k">gitleaks</code> (committed secrets and keys), and <code className="k">trivy</code>{" "}
+          (vulnerable dependencies and container CVEs). These act on artifacts, not the network, so they run
+          without touching a live host. Findings land in the graph and dashboard like any other.
+        </Step>
+        <Step n={2} title="Dynamic analysis (DAST) — probe the running target">
+          Set the target to a reachable host or URL. The agent starts with recon —{" "}
+          <code className="k">nmap</code> for ports/services and <code className="k">tls_cert</code> for
+          transport hygiene — then runs the <span className="badge pill">DAST</span> tools against what it
+          finds: <code className="k">nikto</code> (server misconfig), <code className="k">nuclei</code>{" "}
+          (templated CVE/misconfig checks), and <code className="k">ffuf</code> (content/endpoint discovery).
+          For app surface behind a login, enable <code className="k">zap</code> and attach an{" "}
+          <strong>auth profile</strong> on launch (a header/token that resolves from secrets, never stored in
+          the run). Raise <em>intensity</em> from <code className="k">light</code> toward{" "}
+          <code className="k">aggressive</code> only within the engagement's cap.
+        </Step>
+        <Step n={3} title="Move to exploitation — gated, and only with your approval">
+          Exploitation and credential attacks stay off unless the engagement's <strong>signed scope</strong>{" "}
+          carries the matching flag (<code className="k">allow_exploit</code> /{" "}
+          <code className="k">allow_credential_attacks</code>). When those are authorized and the agent finds a
+          candidate, it will <strong>stop and ask you in the chat</strong> before acting —{" "}
+          <code className="k">exploit</code> / <code className="k">post_exploit</code> (Metasploit, defaulting
+          to a non-destructive check) and <code className="k">credential_attack</code> (Hydra, hard-capped).
+          Approve to proceed, deny to keep it to non-intrusive steps. Confirmed results feed the attack-chain
+          correlation on the dashboard.
+        </Step>
+      </div>
+
+      <SectionTitle>Talking to the agent (permissions &amp; recommendations)</SectionTitle>
+      <p className="muted" style={{ marginBottom: 10 }}>
+        The Agent Chat is a two-way conversation. The agent streams its reasoning, tool calls, and findings,
+        and when it needs you it posts a prompt and <strong>waits</strong> — the reply box under the transcript
+        lights up. There are three kinds of prompt:
+      </p>
+      <ul className="muted" style={{ paddingLeft: 20, lineHeight: 1.8 }}>
+        <li>
+          <strong>🔒 Permission</strong> — an approve/deny gate the agent must clear before any intrusive step.
+          Use the <strong>Approve</strong> / <strong>Deny</strong> buttons, or type a specific instruction.
+        </li>
+        <li>
+          <strong>💡 Recommendation</strong> — the agent proposes a next action and asks you to steer. Reply to
+          redirect it, or approve its suggestion.
+        </li>
+        <li>
+          <strong>❔ Question</strong> — anything else it needs (a credential hint, which host to prioritize).
+        </li>
+      </ul>
+      <Callout>
+        Your reply is <strong>guidance, not authorization</strong>: it re-enters the planner as context and can
+        never widen scope — the guard and flag gate still decide what a tool may do. If you don't reply within
+        the timeout, the agent proceeds autonomously but <strong>never</strong> launches an intrusive tool
+        without an explicit approval.
+      </Callout>
+
       <SectionTitle>Tool catalog</SectionTitle>
       <div className="table-wrap">
         <table className="data">
@@ -151,8 +219,8 @@ export default function Guide() {
 
       <SectionTitle>Reading the graph</SectionTitle>
       <p className="muted">
-        The Network Map is a live knowledge graph. Node color encodes the entity type — purple engagements,
-        blue hosts, green ports, yellow services, red findings — and edges show relationships
+        The Network Map is a live knowledge graph. Node color encodes the entity type — green engagements,
+        cyan hosts, lime ports, amber services, red findings — and edges show relationships
         (a host <em>has</em> a port, a finding <em>affects</em> a host). Hover a node to highlight its
         connections. It's the same data the dashboard and report draw from, just visualized.
       </p>

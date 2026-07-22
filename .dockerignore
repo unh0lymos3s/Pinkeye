@@ -1,0 +1,16 @@
+# Build artifacts must never be copied into the image: a stale build/lib shadows
+# the real source when setuptools' build_py skips files whose build copy is newer.
+**/build/
+**/dist/
+**/*.egg-info/
+**/__pycache__/
+**/*.pyc
+
+# Local dev cruft that has no place in the image
+.venv/
+venv/
+.pytest_cache/
+node_modules/
+.next/
+.git/
+.env

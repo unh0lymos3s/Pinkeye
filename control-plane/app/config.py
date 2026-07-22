@@ -13,6 +13,11 @@ class Settings:
     )
     # HMAC key used to sign/verify engagement scopes. Must be set in any real deployment.
     scope_signing_key: str = os.getenv("EYE_SCOPE_SIGNING_KEY", "dev-insecure-signing-key")
+    # Root directory that uploaded SAST codebases are extracted into. It must resolve to the SAME
+    # absolute path on the host, inside the api/worker containers, and inside any MCP SAST sibling
+    # (e.g. the pooled Snyk container), so the extracted path a run targets means the same thing in
+    # each place. In Compose that is a host bind mount at /eye-uploads; locally it is just a host dir.
+    upload_root: str = os.getenv("EYE_UPLOAD_ROOT", "/eye-uploads")
 
 
 settings = Settings()

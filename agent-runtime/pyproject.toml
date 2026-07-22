@@ -1,13 +1,22 @@
 [project]
-name = "eye-agent-runtime"
+name = "pinkeye-agent-runtime"
 version = "0.1.0"
-description = "Codename Eye agent runtime: sandboxed security tools, normalizers, orchestrator."
+description = "Pinkeye agent runtime: sandboxed security tools, normalizers, orchestrator."
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",
     "docker>=7.0",
+    # LLM provider SDKs. Imported lazily in runtime/llm/*, but must be present in any real
+    # deployment — the default provider (ollama) speaks the OpenAI-compatible API via `openai`,
+    # and `anthropic` backs the claude provider / fallback. Without these, agent runs fail on the
+    # first model call with ModuleNotFoundError.
+    "openai>=1.30",
+    "anthropic>=0.34",
+    # Official MCP SDK: drives pooled, warm stdio sessions to hosted MCP servers (runtime/mcp/session.py).
+    # The dependency-free client.py remains for one-shot/non-pooled use and tests.
+    "mcp>=1.0",
     # Shares scope guard, models, audit, and graph client with the control plane.
-    "eye-control-plane",
+    "pinkeye-control-plane",
 ]
 
 [project.optional-dependencies]
