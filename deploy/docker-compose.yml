@@ -48,7 +48,11 @@ services:
       # `docker compose build mcp-snyk` before first use.
       SNYK_TOKEN: ${SNYK_TOKEN:-}
       EYE_SRC_ROOT: ${EYE_SRC_ROOT:-/samples}
-      EYE_MCP_SERVERS: '{"semgrep":{"pooled":true,"image":"eye-mcp-snyk:latest","tool":"snyk_code_scan","target_arg":"path","env":{"SNYK_TOKEN":"${SNYK_TOKEN:-}"},"mounts":["${EYE_SRC_ROOT:-/samples}:/samples:ro"]}}'
+      # Root for codebases uploaded via the SAST tab. It is bind-mounted at the SAME absolute path on
+      # the host and in this container (below), and read-only into the Snyk sibling (mounts), so an
+      # extracted path means the same thing to the api, the disposable sandbox, and the MCP server.
+      EYE_UPLOAD_ROOT: /eye-uploads
+      EYE_MCP_SERVERS: '{"semgrep":{"pooled":true,"image":"eye-mcp-snyk:latest","tool":"snyk_code_scan","target_arg":"path","env":{"SNYK_TOKEN":"${SNYK_TOKEN:-}"},"mounts":["${EYE_SRC_ROOT:-/samples}:/samples:ro","/eye-uploads:/eye-uploads:ro"]}}'
     ports:
       - "9000:9000"
     depends_on:
@@ -56,9 +60,11 @@ services:
       - postgres
     # The API launches disposable sandbox containers AND the pooled MCP sibling on the host's Docker
     # daemon. This socket mount is a known Phase 1 trade-off; Phase 6 replaces it with a brokered,
-    # rootless runner so the API never holds full daemon access.
+    # rootless runner so the API never holds full daemon access. The uploads bind mount uses an
+    # identical host:container path so a SAST target the api extracts is bind-mountable by the daemon.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /eye-uploads:/eye-uploads
 
   # Scan worker: drains the durable job queue. Scale with `docker compose up --scale worker=N`.
   worker:
@@ -81,12 +87,14 @@ services:
       # Mirror the api service so job-queue runs also use the pooled Snyk MCP SAST backend.
       SNYK_TOKEN: ${SNYK_TOKEN:-}
       EYE_SRC_ROOT: ${EYE_SRC_ROOT:-/samples}
-      EYE_MCP_SERVERS: '{"semgrep":{"pooled":true,"image":"eye-mcp-snyk:latest","tool":"snyk_code_scan","target_arg":"path","env":{"SNYK_TOKEN":"${SNYK_TOKEN:-}"},"mounts":["${EYE_SRC_ROOT:-/samples}:/samples:ro"]}}'
+      EYE_UPLOAD_ROOT: /eye-uploads
+      EYE_MCP_SERVERS: '{"semgrep":{"pooled":true,"image":"eye-mcp-snyk:latest","tool":"snyk_code_scan","target_arg":"path","env":{"SNYK_TOKEN":"${SNYK_TOKEN:-}"},"mounts":["${EYE_SRC_ROOT:-/samples}:/samples:ro","/eye-uploads:/eye-uploads:ro"]}}'
     depends_on:
       - neo4j
       - postgres
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /eye-uploads:/eye-uploads
 
   # Build-only: produces the hardened Snyk MCP server image the pool launches as a sibling. It is not
   # started by `up` (the pool runs it on demand); build it with `docker compose build mcp-snyk`.

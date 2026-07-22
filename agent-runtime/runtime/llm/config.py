@@ -3,7 +3,7 @@
 Different agent roles can use different models (a cheap local model for parsing/triage, a stronger
 model for planning). Configuration is by environment variable so the harness stays model-agnostic:
 
-    EYE_LLM_PROVIDER        claude | openai | ollama   (default: claude)
+    EYE_LLM_PROVIDER        claude | openai | ollama   (default: ollama @ localhost:11434)
     EYE_LLM_MODEL           model id for the default provider
     EYE_LLM_<ROLE>_MODEL    optional per-role override, e.g. EYE_LLM_PLANNER_MODEL
     EYE_LLM_MAX_TOKENS      per-call output cap (default 8192)
@@ -69,7 +69,7 @@ def _build_one(provider: str, model: str | None, base_url: str | None,
     if provider == "ollama":
         from .ollama import OllamaProvider
 
-        return OllamaProvider(model=model or "gemma4:cloud",
+        return OllamaProvider(model=model or "minimax-m3:cloud",
                               base_url=base_url or DEFAULT_OLLAMA_BASE_URL)
     raise ValueError(f"unknown EYE_LLM_PROVIDER: {provider}")
 
@@ -102,7 +102,7 @@ def _parse_fallbacks(raw: object, default_provider: str, base_url: str | None,
 def get_provider(role: str = "planner") -> LLMProvider:
     file_cfg = _load_file_config()
 
-    provider = (os.getenv("EYE_LLM_PROVIDER") or file_cfg.get("provider") or "claude").lower()
+    provider = (os.getenv("EYE_LLM_PROVIDER") or file_cfg.get("provider") or "ollama").lower()
     model = (os.getenv(f"EYE_LLM_{role.upper()}_MODEL") or os.getenv("EYE_LLM_MODEL")
              or file_cfg.get("model"))
     base_url = os.getenv("EYE_LLM_BASE_URL") or file_cfg.get("base_url")

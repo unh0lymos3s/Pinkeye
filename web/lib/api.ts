@@ -81,6 +81,40 @@ export function createRun(engagementId: string, opts: RunOptions) {
   }).then(json<{ id: string; status: string }>);
 }
 
+// ---- SAST source upload ----
+
+export type SastUpload = {
+  path: string; // extracted directory the scan targets (also added to the engagement's signed scope)
+  kind: string; // "zip" | "tar" | "file"
+  file_count: number;
+  total_bytes: number;
+  artifact: string;
+};
+
+// Upload a codebase (zip / tar / tar.gz) or a single source file for static analysis. The raw file
+// is sent as the request body with the name in the query string — no multipart needed. The server
+// extracts it, authorizes the extracted path in the engagement's signed scope, and returns the path
+// a SAST run then targets.
+export function uploadSast(engagementId: string, file: File) {
+  const name = encodeURIComponent(file.name || "upload.zip");
+  return fetch(`${BASE}/engagements/${engagementId}/sast/upload?filename=${name}`, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: file,
+  }).then(async (r) => {
+    if (!r.ok) {
+      let detail = `${r.status}`;
+      try {
+        detail = (await r.json())?.detail ?? detail;
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new Error(detail);
+    }
+    return r.json() as Promise<SastUpload>;
+  });
+}
+
 // ---- tool library (agent-mode tool selection) ----
 
 export type Tool = {

@@ -163,3 +163,28 @@ def test_delta_event_entity_kind_does_not_collide_with_event_kind():
         return kind, data
     for e in events:
         assert emit("memory_delta", **e)[0] == "memory_delta"
+
+
+def test_ask_user_emits_ask_event_with_prompt_kind():
+    # Regression: an ask_user prompt carries its own `kind` (permission/recommendation/question).
+    # emit("ask", ..., kind=kind, ...) once raised "got multiple values for argument 'kind'" and
+    # crashed the run; the event framework's positional-only `kind` param now lets the two coexist.
+    from app.events import RunInbox
+
+    eng = make_engagement()
+    run = Run(id="r1", engagement_id="e1", target="10.0.0.5")
+    sink = MemoryRunEventSink()
+    inbox = RunInbox()
+    inbox.deliver(run.id, "Approved — proceed.")  # so the blocking wait returns immediately
+    ask = ProviderResponse(tool_calls=[ToolCall(
+        id="a1", name="ask_user", arguments={"question": "May I exploit?", "kind": "permission"})])
+    provider = FakeProvider([ask, ProviderResponse(text="done")])
+
+    result = run_agent(eng, run, provider, _registry(), FakeSandbox(SAMPLE_XML.encode()),
+                       FakeGraph(), MemoryAuditSink(), budget=Budget(), events=sink, inbox=inbox)
+
+    assert result.stop_reason == "agent finished"
+    asks = [e for e in sink.events if e.kind == RunEventKind.ask]
+    assert asks and asks[0].data["kind"] == "permission" and asks[0].data["question"] == "May I exploit?"
+    # The operator's reply was echoed back into the transcript.
+    assert any(e.kind == RunEventKind.user_reply for e in sink.events)

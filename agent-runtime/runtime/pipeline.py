@@ -49,3 +49,13 @@ def stage_of(tool_name: str) -> str:
     """Return the pipeline stage a tool belongs to, defaulting to the first stage for unknown tools
     so the UI never renders an empty stage for a tool we forgot to map."""
     return _TOOL_STAGE.get(tool_name, STAGES[0])
+
+
+def tools_for_stage(stage: str) -> list[str]:
+    """Return the tool names mapped to a pipeline stage — the reverse of `_TOOL_STAGE`.
+
+    This is the single source of truth for a specialist sub-agent's tool subset: a specialist owns
+    a stage, and its tools are exactly the tools that render under that stage in the pipeline rail.
+    A stage with no tool of its own (e.g. "report") returns an empty list.
+    """
+    return [name for name, mapped in _TOOL_STAGE.items() if mapped == stage]

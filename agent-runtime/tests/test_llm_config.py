@@ -25,11 +25,13 @@ def _clear_llm_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def test_default_is_bare_claude_provider():
+def test_default_is_bare_ollama_provider():
+    # With no env/config, the harness defaults to a local Ollama at localhost:11434.
     provider = get_provider()
-    assert isinstance(provider, ClaudeProvider)
+    assert isinstance(provider, OllamaProvider)
     assert not isinstance(provider, RefusalAwareProvider)
-    assert provider._model == "claude-fable-5"
+    assert provider._base_url == "http://localhost:11434/v1"
+    assert provider._model == "minimax-m3:cloud"
 
 
 def test_ollama_honors_configurable_base_url(monkeypatch):
@@ -91,7 +93,7 @@ def test_env_overrides_file(tmp_path, monkeypatch):
 def test_missing_config_file_is_ignored(monkeypatch):
     monkeypatch.setenv("EYE_LLM_CONFIG", "/no/such/file.json")
     provider = get_provider()
-    assert isinstance(provider, ClaudeProvider)  # falls back to defaults, does not raise
+    assert isinstance(provider, OllamaProvider)  # falls back to defaults, does not raise
 
 
 def test_openai_key_resolution_prefers_explicit_then_env(monkeypatch):

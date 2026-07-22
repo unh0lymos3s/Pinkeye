@@ -37,14 +37,38 @@ const STATUS_COLOR: Record<string, string> = {
   gone: "#5f7a66",
 };
 
-function nodeTitle(props: Record<string, unknown>): string {
-  return (
-    (props.address as string) ||
-    (props.name as string) ||
-    (props.title as string) ||
-    (props.number != null ? `:${props.number}` : "") ||
-    "node"
-  );
+// Label a node by the field that actually identifies its type, so the IP -> Port -> Service chain
+// reads as e.g. "10.0.0.5" -> ":22/tcp" -> "ssh" instead of the IP repeated at every level. Every
+// node carries `address` (the parent IP) for MERGE keying, so a type-blind lookup showed the IP
+// everywhere — here the node's Neo4j label decides which property is its name.
+function nodeTitle(label: string, props: Record<string, unknown>): string {
+  const s = (v: unknown) => (v == null ? "" : String(v));
+  switch (label) {
+    case "Engagement":
+      return s(props.name) || "engagement";
+    case "IP":
+      return s(props.address) || s(props.hostname) || "ip";
+    case "Port": {
+      const num = props.number ?? props.port;
+      const proto = s(props.proto);
+      return num != null ? `:${num}${proto ? `/${proto}` : ""}` : "port";
+    }
+    case "Service":
+      return (
+        s(props.name) ||
+        s(props.product) ||
+        (props.port != null ? `:${props.port}` : "") ||
+        "service"
+      );
+    case "Endpoint":
+      return s(props.url) || s(props.address) || "endpoint";
+    case "Finding":
+      return s(props.title) || s(props.category) || "finding";
+    case "AttackChain":
+      return s(props.title) || "chain";
+    default:
+      return s(props.address) || s(props.name) || s(props.title) || "node";
+  }
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -108,7 +132,7 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
       graph.nodes.map((n, i) => ({
         id: n.id,
         label: n.label,
-        title: nodeTitle(n.props),
+        title: nodeTitle(n.label, n.props),
         exploitable: Boolean(n.props.exploitable || n.props.is_target),
         status: (n.props.status as string) || "",
         x: W / 2 + Math.cos((i / Math.max(1, graph.nodes.length)) * 2 * Math.PI) * 180,

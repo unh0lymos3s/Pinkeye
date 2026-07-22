@@ -38,3 +38,18 @@ def all_tools(db=None) -> list:
     # replaced by an MCP-backed variant that still runs behind the scope guard, flag gate, and audit.
     # No config -> the list is returned unchanged (every tool stays on its sandbox path).
     return wrap_tools_with_mcp(tools)
+
+
+def select_tools(tools: list, names: list[str] | None) -> list:
+    """Narrow the tool set to the operator's per-run selection (the "tool library" checkboxes).
+
+    This is a *capability restriction*, never an authorization change: a tool not in the returned list
+    is simply never offered to the planner, so it cannot run — the scope guard/flag gate still apply on
+    top of whatever remains. `None`/empty means "all tools". If a non-empty selection matches nothing
+    (e.g. stale names), fall back to all so a run is never silently toolless.
+    """
+    if not names:
+        return list(tools)
+    wanted = set(names)
+    chosen = [t for t in tools if getattr(t, "name", None) in wanted]
+    return chosen or list(tools)

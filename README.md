@@ -115,12 +115,13 @@ orchestrator in-process and the worker can run the same code path.
 | `EYE_POSTGRES_DSN` | `postgresql://eye:eye@localhost:5432/eye` | Postgres DSN |
 | `EYE_SCOPE_SIGNING_KEY` | `dev-insecure-signing-key` | **HMAC key for signing scopes — set this** |
 | `EYE_API_KEYS` | _(unset → open dev mode)_ | RBAC keys: `key:tenant:role,...` (role = viewer\|operator\|admin) |
-| `EYE_LLM_PROVIDER` | `claude` | `claude` \| `openai` \| `ollama` |
+| `EYE_LLM_PROVIDER` | `ollama` | `claude` \| `openai` \| `ollama` (default targets a local Ollama at `localhost:11434`) |
 | `EYE_LLM_MODEL` | provider default | model id; `EYE_LLM_<ROLE>_MODEL` overrides per role |
 | `EYE_LLM_BASE_URL` | — | base URL for the `openai`/`ollama` adapter (Ollama, vLLM/LM Studio, or a LiteLLM proxy) |
 | `EYE_LLM_API_KEY` | — | API key for the `openai` adapter; falls back to `OPENAI_API_KEY`. Claude reads `ANTHROPIC_API_KEY`; Ollama needs none |
 | `EYE_LLM_CONFIG` | — | path to a JSON router file, re-read each run — edit to hot-swap the model/fallbacks with no restart |
 | `EYE_LLM_FALLBACK_MODELS` | — | comma list of `provider:model` (or bare `model`) tried in order when the primary refuses |
+| `EYE_UPLOAD_ROOT` | `/eye-uploads` | where SAST uploads are extracted; must be the same absolute path on host + api/worker + any MCP SAST sibling |
 | `EYE_SANDBOX_RUNTIME` | daemon default (`runc`) | e.g. `runsc` for gVisor isolation |
 | `EYE_EGRESS_ENFORCER` | — | external command applying per-job egress firewall rules |
 | `EYE_SECRETS_DIR` | `/run/secrets` | directory scanned for secret files |
@@ -178,14 +179,17 @@ export EYE_LLM_BASE_URL=https://ollama.com/v1
 export EYE_LLM_API_KEY=...               # your Ollama key (compose reads OLLAMA_API_KEY from deploy/.env)
 ```
 
-**Local / self-hosted Ollama (fully on-host, no cloud).** Run Ollama yourself and point at it. From a
-container use `http://host.docker.internal:11434/v1` (needs the host reachable from Docker — bind
-Ollama to `0.0.0.0` and allow the Docker subnet through any host firewall), or run Ollama as a
+**Local / self-hosted Ollama (fully on-host, no cloud) — the built-in default.** With no
+`EYE_LLM_*` set, the harness uses a local Ollama at `http://localhost:11434/v1` (model
+`minimax-m3:cloud`), so a bare local run needs no LLM env at all. Run Ollama yourself and point at it;
+from a container use `http://host.docker.internal:11434/v1` (needs the host reachable from Docker —
+bind Ollama to `0.0.0.0` and allow the Docker subnet through any host firewall), or run Ollama as a
 compose service on the same network:
 
 ```bash
 ollama serve &
 ollama pull llama3.1
+# The provider/base_url already default to local Ollama; set these only to override the model/endpoint.
 export EYE_LLM_PROVIDER=ollama EYE_LLM_MODEL=llama3.1 EYE_LLM_BASE_URL=http://localhost:11434/v1
 ```
 
@@ -199,10 +203,10 @@ export EYE_LLM_BASE_URL=https://api.groq.com/openai/v1   # omit for OpenAI itsel
 export EYE_LLM_API_KEY=sk-...                        # or set OPENAI_API_KEY
 ```
 
-**Anthropic Claude (the default):**
+**Anthropic Claude:**
 
 ```bash
-export EYE_LLM_PROVIDER=claude                       # optional — this is the default
+export EYE_LLM_PROVIDER=claude
 export EYE_LLM_MODEL=claude-fable-5
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
@@ -310,6 +314,35 @@ curl -X POST localhost:9000/engagements/<id>/runs -H 'content-type: application/
 
 With `EYE_API_KEYS` set, pass `-H "X-API-Key: <key>"`; writing requires `operator`, reading `viewer`.
 
+### SAST: scan an uploaded codebase
+
+The **SAST** tab (`/sast`) lets an operator upload a codebase — a `.zip` / `.tar` / `.tar.gz`, or a
+single source file — instead of pre-mounting a repo path. The harness extracts it, **authorizes the
+extracted directory by adding it to the engagement's signed scope** (`allowed_artifacts`, re-signed),
+then runs the `sast` specialist over it with the chosen analyzers streaming live: **Snyk Code** (the
+`semgrep` slot when the Snyk MCP backend is wired, else Semgrep), **gitleaks** (secrets), and
+**trivy** (dependency CVEs). Uploading is the authorization decision — it is operator-gated, audited,
+and can only ever add a local source path; it never grants a network or offensive capability.
+
+```bash
+# Raw file as the request body; the server extracts it and returns the path a SAST run targets.
+curl -X POST "localhost:9000/engagements/<id>/sast/upload?filename=app.zip" \
+  --data-binary @app.zip -H 'content-type: application/octet-stream'
+# -> {"path":"/eye-uploads/<id>/<uuid>","file_count":123,"kind":"zip", ...}
+
+# Then scan it (agent `sast` profile over the enabled analyzers):
+curl -X POST localhost:9000/engagements/<id>/runs -H 'content-type: application/json' \
+  -d '{"target":"/eye-uploads/<id>/<uuid>","mode":"agent","profile":"sast",
+       "enabled_tools":["semgrep","gitleaks","trivy"]}'
+```
+
+> **Shared upload path (important for Docker/MCP).** The extracted path must resolve to the **same
+> absolute path** for the api container, the disposable sandbox (bind-mounted at `/src`), and any MCP
+> SAST sibling (e.g. the pooled Snyk container). The Compose file wires this: `EYE_UPLOAD_ROOT`
+> (`/eye-uploads`) is a host bind mount at an identical `host:container` path on `api`/`worker`, and is
+> mounted read-only into the Snyk sibling. Running locally (no containers) it is just a host directory,
+> so paths already match. Set `EYE_UPLOAD_ROOT` to relocate it.
+
 ### Run an engagement with the LLM agent (end-to-end)
 
 Agent mode (`"mode":"agent"`) hands planning to the configured LLM: it proposes tool calls,
@@ -351,6 +384,7 @@ transitions render inline. A model that declines an authorized step surfaces as 
 |---------------|---------|
 | `POST /engagements`, `GET /engagements`, `GET /engagements/{id}` | manage engagements |
 | `POST /engagements/{id}/runs`, `GET /runs/{id}` | launch / inspect runs |
+| `POST /engagements/{id}/sast/upload?filename=` | upload a codebase (zip/tar/file) for static analysis; extracts + authorizes the path |
 | `GET /runs/{id}/events` (SSE), `GET /runs/{id}/transcript` | live agent event stream / full transcript |
 | `GET /map`, `GET /engagements/{id}/graph` | network map (capped) |
 | `POST /engagements/{id}/graph/query` | read-only Cypher over the graph |

@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .audit import MemoryAuditSink, PostgresAuditSink
+from .audit import AuditEvent, EventType, MemoryAuditSink, PostgresAuditSink
 from .auth import Authenticator, Principal, has_role
 from .config import settings
 from .events import RunEventStore, RunInbox
@@ -41,6 +41,7 @@ from .repositories import (
 )
 from .scope import sign_scope
 from .store import Store
+from .uploads import UploadError, save_and_extract
 
 # Agent runtime lives in a sibling package; the single-host image installs both.
 from runtime.agent import DEFAULT_MISSION, ORCHESTRATOR_MISSION, run_agent
@@ -292,6 +293,69 @@ def get_engagement(engagement_id: str):
     if not eng:
         raise HTTPException(404, "engagement not found")
     return eng
+
+
+@app.post("/engagements/{engagement_id}/sast/upload")
+async def upload_sast_source(
+    engagement_id: str,
+    request: Request,
+    filename: str = "upload.zip",
+    principal: Principal = Depends(require("operator")),
+):
+    """Ingest a codebase to statically analyze: the raw archive (zip / tar / tar.gz) or a single
+    source file is POSTed as the request body, with `?filename=` naming it. We extract it into the
+    upload root, then authorize exactly that extracted directory by adding it to the engagement's
+    signed scope (allowed_artifacts) and re-signing.
+
+    Uploading a codebase to scan IS the authorization decision — it is operator-gated and audited —
+    so extending the scope to the extracted path is deliberate, and it can only ever *add* a local
+    source path (surface="artifact"); it never touches network CIDRs/domains or any offensive flag.
+    The returned `path` is what a subsequent SAST run targets (semgrep/Snyk, gitleaks, trivy, or the
+    `sast` agent profile). The path is chosen so it resolves identically for the sandbox mount and any
+    MCP SAST sibling (see settings.upload_root)."""
+    if not limiter.allow(principal.tenant_id):
+        raise HTTPException(429, "rate limit exceeded for tenant")
+    eng = _load_engagement(engagement_id)
+    if not eng:
+        raise HTTPException(404, "engagement not found")
+
+    data = await request.body()
+    try:
+        result = save_and_extract(settings.upload_root, engagement_id, filename, data)
+    except UploadError as exc:
+        raise HTTPException(400, str(exc))
+    except OSError as exc:
+        raise HTTPException(500, f"could not store upload: {exc}")
+
+    if result.file_count == 0:
+        raise HTTPException(400, "archive contained no files to analyze")
+
+    # Authorize the extracted directory: add it to allowed_artifacts and re-sign the scope. The guard
+    # prefix-matches, so the run's target (this exact dir, or a file under it) is now in scope.
+    scope = eng.scope
+    if result.path not in scope.allowed_artifacts:
+        scope.allowed_artifacts = [*scope.allowed_artifacts, result.path]
+        scope.signature = sign_scope(scope)
+        _save_engagement(eng, principal.tenant_id)
+
+    # Record the authorization decision: an upload extends the signed scope, so it belongs in the same
+    # audit trail as every scope check. There is no run yet, so it is keyed to a synthetic upload id.
+    try:
+        audit.append(AuditEvent(
+            engagement_id=engagement_id, run_id=f"upload:{uuid.uuid4().hex[:12]}",
+            type=EventType.scope_decision, tool="sast_upload", target=result.path, allowed=True,
+            detail=f"authorized uploaded {result.kind} ({result.file_count} files) for static analysis",
+        ))
+    except Exception:
+        pass
+
+    return {
+        "path": result.path,
+        "kind": result.kind,
+        "file_count": result.file_count,
+        "total_bytes": result.total_bytes,
+        "artifact": result.path,
+    }
 
 
 @app.post("/engagements/{engagement_id}/runs")

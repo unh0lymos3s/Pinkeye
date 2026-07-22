@@ -15,3 +15,6 @@ web/next-env.d.ts
 
 # Local env
 .env
+
+# Claude Code local tooling state (worktrees, caches) — not project source
+.claude/
