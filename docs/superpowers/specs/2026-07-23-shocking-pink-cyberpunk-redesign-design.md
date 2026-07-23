@@ -1,67 +1,87 @@
-# Shocking-pink cyberpunk redesign — design
+# Shocking-pink cartoon redesign — design
+
+(Filename retains "cyberpunk" from the original brief; the direction below
+evolved to a cartoonish flat pink-and-white poster look — no dark mode, no
+glow — per follow-up feedback.)
 
 ## Goal
 
-Replace the current pastel hotpink/indigo/purple theme with a monochrome
-shocking-pink + white + near-black cyberpunk look, hide the top nav behind a
-hover bubble on the right edge, and restructure the landing page from a
-stacked form page into three centered controls: an Engagement toggle, a
-center "The eye" button that opens the knowledge graph on its own page, and
-a Launch-a-run toggle.
+Replace the current pastel hotpink/indigo/purple theme with a cartoonish,
+fully-saturated shocking-pink + white look (no black, no dark mode), hide
+the top nav behind a hover bubble on the right edge, and restructure the
+landing page from a stacked form page into three centered controls: an
+Engagement toggle, a center "The eye" button that opens the knowledge graph
+on its own page, and a Launch-a-run toggle.
 
-## 1. Palette (fully monochrome — pink, white, black only)
+## 1. Palette (shocking pink field, white for contrast — no black)
 
-No more distinct hues for brand/severity/graph. Everything is encoded with a
-single shocking-pink hue at varying intensity, plus white and near-black.
+The page itself is a solid shocking-pink field. Cards sit on top in a
+closely-related pink shade with a thin white border and white text — low
+contrast by design, for a bold "pink-on-pink" poster look. Anywhere data
+actually needs to be scannable (severity, graph node type/status), white
+intensity is the emphasis signal instead, since pink-on-pink can't carry
+that gradation itself.
 
 **Chrome tokens** (`web/app/globals.css` `:root`):
-- `--bg`: near-black (`#0a0509`)
-- `--surface` / `--surface-2` / `--surface-3`: ascending near-black grays with
-  a faint pink tint
-- `--border` / `--border-strong`: dark pink-tinted grays
-- `--text`: white/cream (`#fff6fa`)
-- `--text-muted`: light pink-gray
-- `--text-dim`: darker gray
-- `--brand`: single solid shocking pink (`#ff0090`-family), no more
-  brand/brand-2 gradient — `.btn-primary`, `.brand .eye`, focus rings, etc.
-  all use the one flat color instead of `linear-gradient(brand, brand-2)`
-- `--ok`: white (calm/success reads as white, not a separate green)
+- `--bg`: solid shocking pink (`#ff0090`-family) — the dominant field color
+- `--surface` / `--surface-2` / `--surface-3`: closely-related pink shades
+  (slightly darker/more saturated than `--bg`) so cards read as distinct
+  blocks without leaving the pink family
+- `--border` / `--border-strong`: white at reduced/full opacity — the thin
+  white borders on every card/control
+- `--text`: white
+- `--text-muted`: white at ~70% opacity
+- `--text-dim`: white at ~45% opacity
+- `--brand`: the same shocking pink as `--bg` (single flat color, no
+  gradient) — used where an element needs to *say* "pink" explicitly (e.g.
+  text on a white surface)
+- `--ok`: white
 
-**Severity** (`.sev-critical` … `.sev-info`): same single pink hue, ramped by
-fill intensity/weight instead of by hue —
-- critical: solid pink fill, white text (max intensity)
-- high: strong pink fill (~55% opacity), pink text
-- medium: medium pink fill (~35%)
-- low: pale pink fill (~18%)
-- info: outline-only, faint pink border, muted text
+**Primary buttons** (`.btn-primary`, "Run agent", "Create", "The eye"):
+inverted — solid **white** fill with pink text/icon. This is the one
+high-contrast element type in the UI, so calls-to-action visibly pop out of
+the pink field instead of blending into it like the low-contrast cards do.
+
+**Severity** (`.sev-critical` … `.sev-info`): ramped by **white**
+intensity, not pink —
+- critical: solid white fill, pink text (max intensity/max attention)
+- high: strong white fill (~55% opacity), white text
+- medium: medium white fill/outline (~35%)
+- low: pale white outline (~18%)
+- info: faint white outline only, muted text
 
 The severity **word** ("critical"/"high"/...) is always printed in the
 badge, so the intensity ramp is reinforcing, not the sole signal.
 
-**Graph node types** (`GraphView.tsx` `COLORS`): white fill = calm/structural
-(`Engagement`, `IP`), solid pink fill = active/notable (`Service`,
-`Finding`), hollow (dark fill + pink outline) = lightweight (`Port`). The
-exploitable ring and the "new" cross-run-status ring both render as a
-pulsing **white** ring — max contrast against the pink fills, since white is
-now reserved for "pay attention" highlights on the graph. "changed" status
-uses a dashed pink ring; "gone" uses a faint dim-gray dashed ring.
+**Graph node types** (`GraphView.tsx` `COLORS`): solid **white** fill for
+anything that needs to pop — `Service`, `Finding` — since a pink fill would
+disappear into the pink canvas. Calm/structural nodes (`Engagement`, `IP`,
+`Port`) are hollow: pink fill (matching the canvas) with a thin white
+outline, so they recede. The exploitable ring and the "new" cross-run-status
+ring both render as a pulsing white ring (thicker/brighter than the hollow
+nodes' outline, so emphasis still reads). "changed" status uses a dashed
+white ring at lower opacity; "gone" uses a faint, low-opacity dashed white
+ring.
 
 **Callouts** (`callout-warn`, `callout-danger`): differentiated by icon (⚠
-vs ⛔) and fill intensity (danger = solid pink + white text, warn = pink
-outline + dim fill), not hue.
+vs ⛔) and white-fill intensity, same ramp logic as severity — danger = solid
+white fill + pink text, warn = white outline + faint white fill.
 
-**Radius/shadow tokens**: unchanged from the current pastel theme (already
-rounded-corner, solid-card style from the prior retheme) — this pass changes
-color and structure, not shape.
+**Radius tokens**: unchanged from the current theme (already rounded-corner,
+solid-card style from the prior retheme) — this pass changes color, not
+shape. **Shadows are removed entirely** (`--shadow`/`--shadow-sm` become
+`none`) — flat cutout shapes, no drop-shadow depth; separation between cards
+and the pink field comes only from the thin white border.
 
 ## 2. Nav: hover bubble, no top bar
 
 `web/app/Nav.tsx` is rewritten from a docked top `<nav>` into a fixed,
 floating control:
 
-- Collapsed: a small circular pink tab (the existing "◉" eye glyph, no
-  "Pinkeye" text) fixed to the right edge, vertically centered
-  (`position: fixed; right: 0; top: 50%; translateY(-50%)`).
+- Collapsed: a small circular **white** tab with the existing "◉" eye glyph
+  in pink (no "Pinkeye" text), fixed to the right edge, vertically centered
+  (`position: fixed; right: 0; top: 50%; translateY(-50%)`) — white so it
+  actually shows up against the solid-pink page.
 - On hover (and `:focus-within` for keyboard use), it expands leftward into
   a rounded panel listing: **Home** (`/`), **Map** (`/map`), Agent Chat,
   SAST, Dashboard, Query, Guide, **API Docs** (external link, folded into
@@ -95,11 +115,12 @@ vertically:
   row**, full width. Clicking an open box again collapses it. Both boxes can
   be open at once, stacked in that panel in click order. The row itself
   never reflows — clicking doesn't move the eye button. An open box's
-  collapsed square gets a highlighted (solid pink) border so it's clear
-  which one is active.
-- **The eye**: a larger square/rounded button, solid pink, bold "THE EYE"
-  label with the eye glyph, centered between the two toggle boxes. It's a
-  `Link` to `/map` — no form, no toggle behavior, just navigation.
+  collapsed square gets a brighter/thicker white border so it's clear which
+  one is active.
+- **The eye**: a larger square/rounded button, styled like the other primary
+  buttons — solid **white** fill, bold pink "THE EYE" label with the eye
+  glyph — centered between the two toggle boxes. It's a `Link` to `/map` —
+  no form, no toggle behavior, just navigation.
 - State kept on this page: `useEngagement()` (selected/select/engagements),
   the create-engagement fields (`name`, `cidrs`), the launch-run fields
   (`target`, `mode`, `tool`, `intensity`), `busy`/`status`, and the two
