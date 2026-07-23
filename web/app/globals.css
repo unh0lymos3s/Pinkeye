@@ -535,21 +535,20 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 
 .eye-btn {
   position: relative;            /* anchor for the overflowing orb */
-  overflow: visible;             /* let the orb break past the white square's edges */
+  overflow: visible;             /* let the orb render past the click target's own edges */
   width: 190px; height: 190px;
   display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
   padding-bottom: 22px;          /* seat the label near the bottom, orb owns the rest */
-  border-radius: var(--radius-lg);
-  background: #ffffff;
-  color: var(--brand);
+  background: transparent;       /* no boxed-in card — the round orb floats directly on the page */
+  color: var(--text);
   text-decoration: none;
   cursor: pointer;
-  transition: background 0.15s;
 }
-.eye-btn:hover { background: rgba(255, 255, 255, 0.85); }
+.eye-btn:hover .eye-orb { filter: drop-shadow(0 12px 26px rgba(255, 255, 255, 0.4)); }
 .eye-btn-icon { font-size: 44px; }
-/* The orb is rendered larger than its 190px button and pinned so its upper third escapes above the
-   white square — the eye that won't stay in its frame. pointer-events:none keeps clicks on the Link. */
+/* The orb is rendered larger than its 190px click target and pinned so its upper third extends
+   above it — with no background card behind it, this reads as one perfectly round orb, not an
+   icon boxed into a square. pointer-events:none keeps clicks landing on the Link underneath. */
 .eye-orb {
   position: absolute;
   left: 50%;
@@ -560,6 +559,7 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
   pointer-events: none;
   z-index: 1;
   filter: drop-shadow(0 10px 22px rgba(255, 45, 160, 0.28));
+  transition: filter 0.15s;
 }
 .eye-btn-label {
   font-size: 15px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em;

@@ -1,14 +1,13 @@
 "use client";
 // A real 3D eyeball (not a flat icon) that tracks the cursor — the one deliberate departure from
-// the rest of the app's flat, shadow-free "shocking pink + white" design system. Sits inside "The
-// eye" landing button in place of the plain glyph, and is rendered larger than its container so it
-// visibly breaks out of the white square (see globals.css .eye-orb). Bare orb only: no eyelid.
+// the rest of the app's flat, shadow-free "shocking pink + white" design system. Floats freely on
+// the page (no boxed-in background — see globals.css .eye-btn/.eye-orb) so it reads as a perfectly
+// round orb rather than an icon inside a square card. Bare orb only: no eyelid, no glare/highlight.
 //
 // Scene graph:
 //   scene
 //   ├─ ambient + directional key + soft fill light
 //   ├─ sclera (static sphere, procedurally veined texture with a tone gradient)
-//   ├─ highlight (static "wet" catchlight — fixed to the light, not the gaze)
 //   └─ irisGroup (rotates to track the cursor)
 //      ├─ iris (flat disc, radial-fiber + limbal-ring texture, brand pink)
 //      ├─ pupil (flat black disc)
@@ -16,7 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-const SIZE = 224; // rendered larger than the 190px button so the orb overflows the white square
+const SIZE = 224; // rendered larger than the 190px click target so the orb overflows it, staying round
 const MAX_DEFLECTION = THREE.MathUtils.degToRad(28); // clamp so the iris never turns past the front hemisphere
 const EASE = 0.11; // lerp factor: eye "settles" onto the cursor instead of snapping
 const NORMALIZE_PX = 460; // cursor distance (px) at which the eye is already at max deflection
@@ -304,25 +303,6 @@ export default function EyeOrb() {
     irisGroup.add(iris, pupil, cornea);
     scene.add(irisGroup);
 
-    // Catchlight: a crisp "wet" reflection of the light source. Kept in the scene (not the iris
-    // group) and static, because a real corneal reflection stays fixed to the light, not the gaze.
-    const highlightGeometry = new THREE.CircleGeometry(0.07, 24);
-    const highlightMaterial = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.92,
-    });
-    const highlight = new THREE.Mesh(highlightGeometry, highlightMaterial);
-    highlight.position.set(-0.16, 0.2, 1.22);
-    highlight.renderOrder = 2;
-    scene.add(highlight);
-    // A tiny secondary sparkle for a more liquid look.
-    const spark = new THREE.Mesh(highlightGeometry, highlightMaterial);
-    spark.scale.setScalar(0.4);
-    spark.position.set(0.08, -0.02, 1.2);
-    spark.renderOrder = 2;
-    scene.add(spark);
-
     // Native listener + a plain ref (not React state) so mousemove never triggers a re-render.
     const mouseTarget = { x: 0, y: 0 };
     const onMouseMove = (e: MouseEvent) => {
@@ -336,7 +316,11 @@ export default function EyeOrb() {
 
     function animate() {
       const targetRotY = THREE.MathUtils.clamp(mouseTarget.x / NORMALIZE_PX, -1, 1) * MAX_DEFLECTION;
-      const targetRotX = THREE.MathUtils.clamp(-mouseTarget.y / NORMALIZE_PX, -1, 1) * MAX_DEFLECTION;
+      // No negation here: three.js's rotation.x already maps a positive angle to "look down" (a
+      // point on +Z rotates toward -Y under positive rotation.x), so a positive angle for a cursor
+      // that's below center (mouseTarget.y > 0, since browser Y grows downward) is what's wanted.
+      // An earlier version negated this and the eye tracked vertically backwards as a result.
+      const targetRotX = THREE.MathUtils.clamp(mouseTarget.y / NORMALIZE_PX, -1, 1) * MAX_DEFLECTION;
       irisGroup.rotation.y = THREE.MathUtils.lerp(irisGroup.rotation.y, targetRotY, EASE);
       irisGroup.rotation.x = THREE.MathUtils.lerp(irisGroup.rotation.x, targetRotX, EASE);
       renderer.render(scene, camera);
@@ -356,8 +340,6 @@ export default function EyeOrb() {
       pupilMaterial.dispose();
       corneaGeometry.dispose();
       corneaMaterial.dispose();
-      highlightGeometry.dispose();
-      highlightMaterial.dispose();
       renderer.dispose();
       container.removeChild(renderer.domElement);
     };
