@@ -219,9 +219,10 @@ export default function Guide() {
 
       <SectionTitle>Reading the graph</SectionTitle>
       <p className="muted">
-        The Network Map is a live knowledge graph. Node color encodes the entity type — green engagements,
-        cyan hosts, lime ports, amber services, red findings — and edges show relationships
-        (a host <em>has</em> a port, a finding <em>affects</em> a host). Hover a node to highlight its
+        The Network Map is a live knowledge graph. Node fill encodes the entity's role — structural nodes
+        (engagements, hosts, ports) render hollow, pink fill with a thin white outline, while the notable
+        "pop" layer (services, findings) renders solid white — and edges show relationships (a host{" "}
+        <em>has</em> a port, a finding <em>affects</em> a host). Hover a node to highlight its
         connections. It's the same data the dashboard and report draw from, just visualized.
       </p>
 
