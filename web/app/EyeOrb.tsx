@@ -15,7 +15,11 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-const SIZE = 224; // rendered larger than the 190px click target so the orb overflows it, staying round
+// Rendered larger than the 190px click target so the orb overflows it, staying round. Bumped from
+// 224 to 250 to compensate for the camera being pulled back (see camera.position.z below) to fix
+// side-cropping — a longer camera distance means the sphere fills less of the frame, so the canvas
+// needs to grow a bit to keep the eye's on-screen size close to what it was before that fix.
+const SIZE = 250;
 const MAX_DEFLECTION = THREE.MathUtils.degToRad(28); // clamp so the iris never turns past the front hemisphere
 const EASE = 0.11; // lerp factor: eye "settles" onto the cursor instead of snapping
 const NORMALIZE_PX = 460; // cursor distance (px) at which the eye is already at max deflection
@@ -225,8 +229,12 @@ export default function EyeOrb() {
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
+    // Distance chosen so the radius-1 sclera comfortably clears the frustum on every side: at
+    // FOV 35°/distance 3.2 the frustum's half-width at the sphere's equator was ~1.009 — almost
+    // exactly the sphere's own radius, so it was clipped flat at the left/right edges. At 4.0 the
+    // half-width is ~1.26, leaving ~20% margin all around instead of ~1%.
     const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 10);
-    camera.position.set(0, 0, 3.2);
+    camera.position.set(0, 0, 4.0);
 
     // three.js r155+ defaults to physically-correct light units, where the old "intensity ~1"
     // convention reads as quite dim — these are tuned up accordingly for a bright, non-gray sclera.

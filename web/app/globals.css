@@ -554,8 +554,8 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
   left: 50%;
   top: 0;
   transform: translate(-50%, -34%);
-  width: 224px;
-  height: 224px;
+  width: 250px;
+  height: 250px;
   pointer-events: none;
   z-index: 1;
   filter: drop-shadow(0 10px 22px rgba(255, 45, 160, 0.28));
