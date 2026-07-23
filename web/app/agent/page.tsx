@@ -86,6 +86,10 @@ export default function AgentChat() {
   const lastSeqRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  // Seqs that arrived over the live SSE stream (as opposed to the initial transcript replay on
+  // reconnect). Only these get the streaming-reveal treatment — replaying old history should show
+  // instantly, not re-animate the whole run.
+  const liveSeqsRef = useRef<Set<number>>(new Set());
 
   // Load the tool library once; default to all tools enabled.
   useEffect(() => {
@@ -125,6 +129,10 @@ export default function AgentChat() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [events.length]);
 
+  // While a "thinking" bubble is still streaming its text in, keep nudging the view along —
+  // instant (not smooth) so it doesn't fight the scroll-on-new-message animation above.
+  const stickToBottom = () => bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+
   function openStream(id: string, after: number) {
     esRef.current?.close();
     const es = new EventSource(runEventsUrl(id, after));
@@ -132,6 +140,7 @@ export default function AgentChat() {
     es.onmessage = (e) => {
       const ev: RunEvent = JSON.parse(e.data);
       lastSeqRef.current = Math.max(lastSeqRef.current, ev.seq);
+      liveSeqsRef.current.add(ev.seq);
       setEvents((prev) => (prev.some((p) => p.seq === ev.seq) ? prev : [...prev, ev]));
       if (ev.kind === "status" && TERMINAL.has(ev.data?.status)) {
         es.close();
@@ -240,7 +249,7 @@ export default function AgentChat() {
         </Callout>
       </div>
 
-      <SectionTitle>1 · Objective &amp; scope</SectionTitle>
+      <SectionTitle>Objective &amp; scope</SectionTitle>
       <div className="card card-pad">
         <div className="row" style={{ alignItems: "flex-end" }}>
           <div className="field" style={{ minWidth: 200 }}>
@@ -307,7 +316,7 @@ export default function AgentChat() {
           )
         }
       >
-        2 · Pipeline
+        Pipeline
       </SectionTitle>
       <div className="card card-pad">
         <div className="pipeline">
@@ -355,43 +364,43 @@ export default function AgentChat() {
         )}
       </div>
 
-      <SectionTitle
-        action={
-          <span className="live">
-            {view.findingCount} findings · {view.changeCount} changes
-          </span>
-        }
-      >
-        Transcript
-      </SectionTitle>
-      <div className="card chat chat-full" ref={scrollRef}>
-        {events.length === 0 && (
-          <div className="dim" style={{ textAlign: "center", padding: "28px 0", fontSize: 13 }}>
-            No run yet — set an objective above and launch the agent to watch it work.
+      <div className="chat-shell" style={{ marginTop: 30 }}>
+        {(view.findingCount > 0 || view.changeCount > 0) && (
+          <div className="chat-shell-head">
+            <span className="live">
+              {view.findingCount} findings · {view.changeCount} changes
+            </span>
           </div>
         )}
-        {events.map((ev) =>
-          // Events a specialist sub-agent produced carry a `subagent` label; nest them under the
-          // subagent_started header so a delegated pass reads as one indented group.
-          ev.data?.subagent ? (
-            <div key={ev.seq} className="nested-sub">
-              <Bubble ev={ev} />
+        <div className="chat chat-full" ref={scrollRef}>
+          {events.length === 0 && (
+            <div className="dim" style={{ textAlign: "center", padding: "28px 0", fontSize: 13 }}>
+              No run yet — set an objective above and launch the agent to watch it work.
             </div>
-          ) : (
-            <Bubble key={ev.seq} ev={ev} />
-          )
-        )}
-        <div ref={bottomRef} />
-      </div>
+          )}
+          {events.map((ev) =>
+            // Events a specialist sub-agent produced carry a `subagent` label; nest them under the
+            // subagent_started header so a delegated pass reads as one indented group.
+            ev.data?.subagent ? (
+              <div key={ev.seq} className="nested-sub">
+                <Bubble ev={ev} live={liveSeqsRef.current.has(ev.seq)} onReveal={stickToBottom} />
+              </div>
+            ) : (
+              <Bubble key={ev.seq} ev={ev} live={liveSeqsRef.current.has(ev.seq)} onReveal={stickToBottom} />
+            )
+          )}
+          <div ref={bottomRef} />
+        </div>
 
-      <Composer
-        pendingAsk={view.pendingAsk}
-        reply={reply}
-        setReply={setReply}
-        sending={sending}
-        onSend={submitReply}
-        hasRun={!!runId}
-      />
+        <Composer
+          pendingAsk={view.pendingAsk}
+          reply={reply}
+          setReply={setReply}
+          sending={sending}
+          onSend={submitReply}
+          hasRun={!!runId}
+        />
+      </div>
     </main>
   );
 }
@@ -656,7 +665,53 @@ function derive(events: RunEvent[]) {
   };
 }
 
-function Bubble({ ev }: { ev: RunEvent }) {
+// Simulated token-stream reveal for a "thinking" bubble: the backend's LLM call is blocking and
+// hands back the full text in one event (agent-runtime has no token-level streaming today), so we
+// fake the live-generation feel client-side by revealing it word-by-word. Only bubbles that arrived
+// over the live SSE stream animate — a reconnect's transcript replay renders instantly, since
+// re-typing an entire past run on every reload would be slow and wouldn't read as "live" anyway.
+function StreamingThinkingText({
+  text,
+  animate,
+  onReveal,
+}: {
+  text: string;
+  animate: boolean;
+  onReveal?: () => void;
+}) {
+  // Keep whitespace as its own tokens so re-joining the revealed slice reproduces the text exactly.
+  const words = useMemo(() => text.split(/(\s+)/), [text]);
+  const [count, setCount] = useState(animate ? 0 : words.length);
+
+  useEffect(() => {
+    if (!animate) return;
+    // Scale how many words land per tick so a very long thought still finishes in a couple of
+    // seconds instead of visibly crawling, while a short one still reads as a real typewriter.
+    const chunk = Math.max(1, Math.ceil(words.length / 150));
+    const id = setInterval(() => {
+      setCount((c) => {
+        const next = Math.min(words.length, c + chunk);
+        if (next >= words.length) clearInterval(id);
+        return next;
+      });
+      onReveal?.();
+    }, 28);
+    return () => clearInterval(id);
+    // Runs once per mount: this bubble's seq (and therefore its React key) never changes, so the
+    // text/animate props are effectively fixed for its lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const streaming = animate && count < words.length;
+  return (
+    <div className="body">
+      {words.slice(0, count).join("")}
+      {streaming && <span className="stream-caret" />}
+    </div>
+  );
+}
+
+function Bubble({ ev, live, onReveal }: { ev: RunEvent; live: boolean; onReveal?: () => void }) {
   const d = ev.data || {};
   switch (ev.kind) {
     case "plan": {
@@ -686,7 +741,7 @@ function Bubble({ ev }: { ev: RunEvent }) {
       return (
         <div className="msg reason">
           <span className="who">◍ agent</span>
-          <div className="body">{d.text}</div>
+          <StreamingThinkingText text={d.text} animate={live} onReveal={onReveal} />
         </div>
       );
     case "tool_call":

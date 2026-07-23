@@ -439,6 +439,36 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 }
 .composer-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
+/* ---- Chat shell: transcript + composer merged into one panel, ChatGPT/Claude-style ---- */
+.chat-shell {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.chat-shell-head {
+  display: flex; align-items: center; justify-content: flex-end;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+}
+.chat-shell .chat { border: none; border-radius: 0; background: transparent; }
+.chat-shell .composer {
+  margin-top: 0; border: none; border-radius: 0;
+  border-top: 1px solid var(--border); background: transparent;
+}
+.chat-shell .composer.active { box-shadow: none; background: rgba(255, 255, 255, 0.06); }
+
+/* Simulated token-stream reveal for the agent's "thinking" bubbles: a blinking caret at the
+   trailing edge while text is still being revealed word-by-word. */
+.stream-caret {
+  display: inline-block;
+  width: 2px; height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: caret-blink 0.9s steps(1) infinite;
+}
+@keyframes caret-blink { 50% { opacity: 0; } }
+
 /* SAST tab: codebase drop zone + analyzer toggles. */
 .sast-drop {
   display: flex; align-items: center; gap: 16px; justify-content: center; text-align: center;
