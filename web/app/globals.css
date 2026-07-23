@@ -46,7 +46,10 @@
 html, body { padding: 0; margin: 0; }
 
 body {
-  background: var(--bg);
+  /* Bullet-journal dot grid: a faint white polka-dot lattice over the flat pink field. */
+  background-color: var(--bg);
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.22) 1.5px, transparent 1.5px);
+  background-size: 22px 22px;
   color: var(--text);
   font-family: var(--font);
   font-weight: 500;
