@@ -5,14 +5,21 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { Graph } from "../lib/api";
 
-// Kept in sync with the --node-* tokens in globals.css (SVG fill attributes can't read CSS vars).
-const COLORS: Record<string, string> = {
-  Engagement: "#ff6fb8",
-  IP: "#7fc8fa",
-  Port: "#c9a6ff",
-  Service: "#ffc861",
-  Finding: "#ff5c8a",
-  Node: "#b6a2d6",
+// Single source of truth for the two-color palette (SVG fill/stroke attributes can't read CSS
+// vars). Kept in sync with --bg/--brand and --text in globals.css.
+export const PINK = "#ff2da0";
+export const WHITE = "#ffffff";
+
+// Node fill/stroke by Neo4j label. "Pop" types (Service, Finding) render solid white so they read
+// as the notable/active layer; "calm" structural types (Engagement, IP, Port) render hollow — pink
+// fill matching the canvas, thin white outline — so they recede into the field.
+const COLORS: Record<string, { fill: string; stroke: string }> = {
+  Engagement: { fill: PINK, stroke: WHITE },
+  IP: { fill: PINK, stroke: WHITE },
+  Port: { fill: PINK, stroke: WHITE },
+  Service: { fill: WHITE, stroke: PINK },
+  Finding: { fill: WHITE, stroke: PINK },
+  Node: { fill: PINK, stroke: WHITE },
 };
 
 const W = 960;
@@ -30,11 +37,12 @@ type P = {
   status: string; // cross-run memory status: new | changed | active | gone
 };
 
-// Ring color for a node's cross-run memory status; null = no status ring.
+// Ring color for a node's cross-run memory status; null = no status ring. All white, ramped by
+// opacity so "new" (max attention) reads brightest and "gone" (least) fades toward the canvas.
 const STATUS_COLOR: Record<string, string> = {
-  new: "#6fe0b8",
-  changed: "#ffc861",
-  gone: "#9683b8",
+  new: "rgba(255, 255, 255, 0.95)",
+  changed: "rgba(255, 255, 255, 0.55)",
+  gone: "rgba(255, 255, 255, 0.3)",
 };
 
 // Label a node by the field that actually identifies its type, so the IP -> Port -> Service chain
@@ -202,7 +210,7 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
       onDoubleClick={resetView}
       style={{
         display: "block",
-        background: "radial-gradient(circle at 50% 40%, #2d2049, #1c1330)",
+        background: PINK,
         borderRadius: 8,
         cursor: panning ? "grabbing" : "grab",
         touchAction: "none",
@@ -217,17 +225,18 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
           <line
             key={i}
             x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-            stroke={active ? "#8a68b8" : "#3a2b57"}
+            stroke={active ? "rgba(255, 255, 255, 0.8)" : "rgba(255, 255, 255, 0.35)"}
             strokeWidth={active ? 1.6 : 1}
           />
         );
       })}
       {nodes.map((n) => {
-        const color = COLORS[n.label] || COLORS.Node;
+        const nc = COLORS[n.label] || COLORS.Node;
         const active = hover === n.id;
         const r = n.label === "Finding" ? 9 : 7;
         const statusColor = STATUS_COLOR[n.status];
         const gone = n.status === "gone";
+        const dashed = gone || n.status === "changed";
         const tip = [n.label, n.title].join(": ")
           + (n.exploitable ? "  ⚠ exploitable" : "")
           + (n.status ? `  (${n.status})` : "");
@@ -238,10 +247,10 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
             onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
             style={{ cursor: "default", opacity: gone ? 0.5 : 1 }}
           >
-            {active && <circle cx={n.x} cy={n.y} r={r + 5} fill={color} opacity={0.18} />}
-            {/* Exploitable ring: an amber halo flags a proven-exploitable service/endpoint or target device. */}
+            {active && <circle cx={n.x} cy={n.y} r={r + 5} fill={nc.fill} opacity={0.25} />}
+            {/* Exploitable ring: a pulsing white halo flags a proven-exploitable service/endpoint or target device. */}
             {n.exploitable && (
-              <circle cx={n.x} cy={n.y} r={r + 4} fill="none" stroke="#ffc861" strokeWidth={2} opacity={0.95} />
+              <circle cx={n.x} cy={n.y} r={r + 4} fill="none" stroke={WHITE} strokeWidth={2.2} opacity={0.95} />
             )}
             {/* Cross-run status ring: new / changed / gone from the memory engine. */}
             {statusColor && (
@@ -252,13 +261,13 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
                 fill="none"
                 stroke={statusColor}
                 strokeWidth={1.4}
-                strokeDasharray={gone ? "3 2" : undefined}
+                strokeDasharray={dashed ? "3 2" : undefined}
                 opacity={0.9}
               />
             )}
-            <circle cx={n.x} cy={n.y} r={r} fill={color} stroke="#1c1330" strokeWidth={1.5} />
+            <circle cx={n.x} cy={n.y} r={r} fill={nc.fill} stroke={nc.stroke} strokeWidth={1.5} />
             {n.exploitable && (
-              <text x={n.x} y={n.y + 3.5} fontSize={9} textAnchor="middle" fill="#2a1240" fontWeight={700}>
+              <text x={n.x} y={n.y + 3.5} fontSize={9} textAnchor="middle" fill={nc.stroke} fontWeight={700}>
                 !
               </text>
             )}
@@ -266,7 +275,7 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
               x={n.x + r + 6}
               y={n.y + 4}
               fontSize={11}
-              fill={active ? "#fbf3ec" : "#cbb9e3"}
+              fill={active ? WHITE : "rgba(255, 255, 255, 0.75)"}
               style={{ fontFamily: "var(--mono)" }}
             >
               {n.title}
