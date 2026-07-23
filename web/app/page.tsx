@@ -13,6 +13,17 @@ import { useLastRun } from "../lib/useLastRun";
 const SCAN_TOOLS = ["nmap", "nikto", "nuclei", "ffuf", "tls_cert", "cve_lookup"];
 const INTENSITIES = ["light", "normal", "aggressive"];
 
+// ANSI/block-art wordmark shown above the launcher row. Each line renders as its own row so the
+// wave animation (globals.css .ascii-row) can stagger a per-row animation-delay across them.
+const ASCII_LOGO = [
+  " ██████╗ ██╗███╗   ██╗██╗  ██╗███████╗██╗   ██╗███████╗",
+  "██╔══██╗██║████╗  ██║██║ ██╔╝██╔════╝╚██╗ ██╔╝██╔════╝",
+  "██████╔╝██║██╔██╗ ██║█████╔╝ █████╗   ╚████╔╝ █████╗  ",
+  "██╔═══╝ ██║██║╚██╗██║██╔═██╗ ██╔══╝    ╚██╔╝  ██╔══╝  ",
+  "██║     ██║██║ ╚████║██║  ██╗███████╗   ██║   ███████╗",
+  "╚═╝     ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝   ╚═╝   ╚══════╝",
+];
+
 export default function Home() {
   const { engagements, selected, select, refresh } = useEngagement();
   const { setLastRunId } = useLastRun(selected);
@@ -64,6 +75,14 @@ export default function Home() {
 
   return (
     <main className="launcher">
+      <pre className="ascii-banner" aria-hidden="true">
+        {ASCII_LOGO.map((line, i) => (
+          <div key={i} className="ascii-row" style={{ animationDelay: `${i * 0.12}s` }}>
+            {line}
+          </div>
+        ))}
+      </pre>
+
       <div className="launcher-row">
         <div className={`toggle-box${engOpen ? " open" : ""}`} onClick={() => setEngOpen((o) => !o)}>
           <span className="toggle-box-icon">◆</span>
@@ -72,7 +91,6 @@ export default function Home() {
 
         <Link href="/map" className="eye-btn">
           <EyeOrb />
-          <span className="eye-btn-label">The eye</span>
         </Link>
 
         <div className={`toggle-box${runOpen ? " open" : ""}`} onClick={() => setRunOpen((o) => !o)}>

@@ -492,7 +492,7 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 .sast-engine-name { font-weight: 600; color: var(--text); }
 .sast-engine-hint { font-size: 11.5px; }
 
-/* ---- Landing launcher: two toggle boxes + center "The eye" button ---- */
+/* ---- Landing launcher: ASCII wordmark, two toggle boxes, center "The eye" button ---- */
 .launcher {
   min-height: 100vh;
   display: flex;
@@ -502,11 +502,35 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
   gap: 28px;
   padding: 32px 24px;
 }
+
+/* ASCII/block-art wordmark above the launcher row. Each line is its own row (see page.tsx) so the
+   wave can ripple through them via a staggered animation-delay instead of moving as one block. */
+.ascii-banner {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.15;
+  font-weight: 700;
+}
+.ascii-row {
+  white-space: pre;
+  animation: ascii-wave 30s ease-in-out infinite;
+}
+/* The bounce occupies only the first ~1.8s of the 30s cycle (0-6%); the row then sits flat for the
+   remaining ~28s until the cycle repeats. Per-row animation-delay (set inline in page.tsx) staggers
+   each row's bounce a beat after the one above it, so the motion reads as a wave rolling down the
+   wordmark rather than every row bobbing in unison. */
+@keyframes ascii-wave {
+  0%, 6%, 100% { transform: translateY(0); }
+  3% { transform: translateY(-8px); }
+}
+
 .launcher-row {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 52px;               /* widened from 40px so the larger, overflowing eye clears its neighbors */
+  gap: 70px;               /* widened so the eye's larger overflow (now centered, not top-anchored) clears its neighbors */
   flex-wrap: wrap;
 }
 .toggle-box {
@@ -533,12 +557,14 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 }
 .toggle-panel .card { flex: 1; min-width: 320px; }
 
+/* Same footprint as .toggle-box (160x160) so the three items in .launcher-row align on the same
+   row height/vertical center — no label anymore, so there's no reason for this to be a taller,
+   bottom-anchored box like it was when it had to leave room for text underneath the orb. */
 .eye-btn {
   position: relative;            /* anchor for the overflowing orb */
   overflow: visible;             /* let the orb render past the click target's own edges */
-  width: 190px; height: 190px;
-  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
-  padding-bottom: 22px;          /* seat the label near the bottom, orb owns the rest */
+  width: 160px; height: 160px;
+  display: flex; align-items: center; justify-content: center;
   background: transparent;       /* no boxed-in card — the round orb floats directly on the page */
   color: var(--text);
   text-decoration: none;
@@ -546,21 +572,18 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 }
 .eye-btn:hover .eye-orb { filter: drop-shadow(0 12px 26px rgba(255, 255, 255, 0.4)); }
 .eye-btn-icon { font-size: 44px; }
-/* The orb is rendered larger than its 190px click target and pinned so its upper third extends
-   above it — with no background card behind it, this reads as one perfectly round orb, not an
+/* The orb is rendered larger than its 160px click target and centered so it overflows evenly on
+   every side — with no background card behind it, this reads as one perfectly round orb, not an
    icon boxed into a square. pointer-events:none keeps clicks landing on the Link underneath. */
 .eye-orb {
   position: absolute;
   left: 50%;
-  top: 0;
-  transform: translate(-50%, -34%);
+  top: 50%;
+  transform: translate(-50%, -50%);
   width: 250px;
   height: 250px;
   pointer-events: none;
   z-index: 1;
   filter: drop-shadow(0 10px 22px rgba(255, 45, 160, 0.28));
   transition: filter 0.15s;
-}
-.eye-btn-label {
-  font-size: 15px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em;
 }
