@@ -293,7 +293,7 @@ export default function AgentChat() {
         {status && <div className="muted" style={{ marginTop: 10, fontSize: 13 }}>{status}</div>}
         {!selected && (
           <div className="dim" style={{ marginTop: 10, fontSize: 13 }}>
-            Select an engagement (create one on the Network Map page) to enable runs.
+            Select an engagement (create one on the Home page) to enable runs.
           </div>
         )}
       </div>

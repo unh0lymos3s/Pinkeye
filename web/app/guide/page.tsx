@@ -76,7 +76,7 @@ export default function Guide() {
       <SectionTitle>The workflow</SectionTitle>
       <div className="card card-pad">
         <Step n={1} title="Create a scoped engagement">
-          On the <Link href="/" className="tag" style={{ textDecoration: "none" }}>Network Map</Link>, give the
+          On the <Link href="/" className="tag" style={{ textDecoration: "none" }}>Home</Link> page, give the
           engagement a name and the CIDRs (and domains) you're authorized to test. The scope is signed at
           creation and becomes the authorization boundary for every run.
         </Step>
@@ -87,8 +87,9 @@ export default function Guide() {
           are hard-rejected and logged.
         </Step>
         <Step n={3} title="Watch the graph fill in">
-          Hosts, ports, services, and findings appear as connected nodes and refresh live. Toggle
-          <em> full map</em> for a cross-engagement overview.
+          Open <Link href="/map" className="tag" style={{ textDecoration: "none" }}>the Map</Link> (via the eye
+          button on the Home page) to watch hosts, ports, services, and findings appear as connected nodes and
+          refresh live. Toggle <em>full map</em> for a cross-engagement overview.
         </Step>
         <Step n={4} title="Review on the dashboard">
           The <Link href="/dashboard" className="tag" style={{ textDecoration: "none" }}>Dashboard</Link> shows
@@ -219,7 +220,7 @@ export default function Guide() {
 
       <SectionTitle>Reading the graph</SectionTitle>
       <p className="muted">
-        The Network Map is a live knowledge graph. Node fill encodes the entity's role — structural nodes
+        The knowledge graph is live. Node fill encodes the entity's role — structural nodes
         (engagements, hosts, ports) render hollow, pink fill with a thin white outline, while the notable
         "pop" layer (services, findings) renders solid white — and edges show relationships (a host{" "}
         <em>has</em> a port, a finding <em>affects</em> a host). Hover a node to highlight its

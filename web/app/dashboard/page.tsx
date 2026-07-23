@@ -70,7 +70,7 @@ export default function Dashboard() {
 
       {!selected && (
         <div style={{ marginTop: 20 }}>
-          <Callout>Select an engagement to view its metrics, or create one on the Network Map.</Callout>
+          <Callout>Select an engagement to view its metrics, or create one on the Home page.</Callout>
         </div>
       )}
       {note && (

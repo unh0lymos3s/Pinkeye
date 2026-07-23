@@ -271,7 +271,7 @@ export default function SastPage() {
         </div>
         {!selected && (
           <div className="dim" style={{ marginTop: 10, fontSize: 13 }}>
-            Select an engagement (create one on the Network Map page) to upload code.
+            Select an engagement (create one on the Home page) to upload code.
           </div>
         )}
       </div>
