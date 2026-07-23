@@ -86,28 +86,49 @@ input, select, textarea, button { accent-color: var(--brand); }
 .section-title h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
 .section-title .rule { flex: 1; height: 1px; background: var(--border); }
 
-/* ---- Nav (docked bar — replaced by .nav-bubble in Task 3) ---- */
-.nav {
-  position: sticky; top: 0; z-index: 20;
-  display: flex; align-items: center; gap: 4px;
-  padding: 10px 20px;
-  background: rgba(255, 45, 160, 0.9);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--border);
+/* ---- Nav: hover bubble fixed to the right edge ---- */
+.nav-bubble {
+  position: fixed;
+  top: 50%;
+  right: 14px;
+  transform: translateY(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
-.brand { display: flex; align-items: center; gap: 9px; font-weight: 750; margin-right: 14px; }
-.brand .eye {
-  width: 24px; height: 24px; border-radius: 9px; display: grid; place-items: center;
+.nav-bubble-tab {
+  width: 34px; height: 34px; flex: none;
+  display: grid; place-items: center;
+  border-radius: 50%;
   background: #ffffff;
-  color: var(--brand); font-size: 13px;
+  color: var(--brand);
+  font-size: 16px;
 }
-.brand .name { font-size: 14.5px; letter-spacing: -0.01em; }
-.nav-link {
-  padding: 7px 12px; border-radius: 8px; text-decoration: none;
-  color: var(--text-muted); font-weight: 500; transition: background 0.12s, color 0.12s;
+.nav-bubble-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  background: #ffffff;
+  border-radius: var(--radius-sm);
+  transition: max-width 0.18s ease, opacity 0.18s ease;
 }
-.nav-link:hover { color: var(--text); background: var(--surface-2); }
-.nav-link.active { color: var(--text); background: var(--brand-soft); box-shadow: inset 0 0 0 1px var(--brand-ring); }
+.nav-bubble:hover .nav-bubble-panel,
+.nav-bubble:focus-within .nav-bubble-panel {
+  max-width: 220px;
+  opacity: 1;
+  padding: 6px;
+}
+.nav-bubble-link {
+  padding: 8px 14px; border-radius: var(--radius-sm); text-decoration: none;
+  color: var(--brand); font-weight: 600; font-size: 13px; white-space: nowrap;
+}
+.nav-bubble-link:hover { background: rgba(255, 45, 160, 0.1); }
+.nav-bubble-link.active { background: var(--brand); color: #ffffff; }
 
 /* ---- Cards ---- */
 .card {
