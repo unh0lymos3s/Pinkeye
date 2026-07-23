@@ -6,9 +6,9 @@
 :root {
   /* Surfaces — solid shocking pink field, closely-related shades for layering */
   --bg: #ff2da0;
-  --surface: #ff3ea6;
-  --surface-2: #ff50ad;
-  --surface-3: #ff62b4;
+  --surface: var(--bg);
+  --surface-2: var(--bg);
+  --surface-3: var(--bg);
   --border: rgba(255, 255, 255, 0.5);
   --border-strong: rgba(255, 255, 255, 0.85);
 
@@ -156,7 +156,7 @@ input, select, textarea, button { accent-color: var(--brand); }
   background: #ffffff;
   border-color: transparent; color: var(--brand); font-weight: 650;
 }
-.btn-primary:hover { background: #ffeaf5; }
+.btn-primary:hover { background: rgba(255, 255, 255, 0.85); }
 .btn-ghost { background: transparent; }
 
 /* ---- Badges ---- */
