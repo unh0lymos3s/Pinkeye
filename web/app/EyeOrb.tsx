@@ -7,7 +7,7 @@
 // Scene graph:
 //   scene
 //   ├─ ambient + directional key + soft fill light
-//   ├─ sclera (static sphere, procedurally veined texture with a tone gradient)
+//   ├─ sclera (static sphere, bloodshot/infected "pink eye" texture — the app's own namesake)
 //   └─ irisGroup (rotates to track the cursor)
 //      ├─ iris (flat disc, radial-fiber + limbal-ring texture, brand pink)
 //      ├─ pupil (flat black disc)
@@ -24,9 +24,10 @@ const MAX_DEFLECTION = THREE.MathUtils.degToRad(28); // clamp so the iris never 
 const EASE = 0.11; // lerp factor: eye "settles" onto the cursor instead of snapping
 const NORMALIZE_PX = 460; // cursor distance (px) at which the eye is already at max deflection
 
-// Draws the sclera's texture: a soft tone gradient (real sclera is not a uniform flat white — it
-// warms toward the corners and cools/brightens over the visible front) plus fine, varied, branching
-// veins that cluster near the equator and thin out toward the poles and the central iris zone.
+// Draws the sclera's texture: an infected, bloodshot "pink eye" (conjunctivitis) look — the app's
+// own namesake condition. A warm reddened wash concentrated toward the iris (real conjunctivitis
+// presents as redness radiating in from the edges toward the cornea — "ciliary injection"), a few
+// thick engorged vessels reaching toward the center, plus a dense field of fine red capillaries.
 function makeScleraTexture(): THREE.CanvasTexture {
   const size = 1024;
   const canvas = document.createElement("canvas");
@@ -35,53 +36,78 @@ function makeScleraTexture(): THREE.CanvasTexture {
   const ctx = canvas.getContext("2d")!;
 
   // SphereGeometry's default UV wrap puts the visible front (where the iris sits) near the texture's
-  // center, and the top/bottom poles at the vertical edges. Shade the center clean and cool, the
-  // vertical extents warmer, so the front reads bright/wet and the corners read fleshy.
-  ctx.fillStyle = "#fbf5f4";
+  // center, and the top/bottom poles at the vertical edges. Keep the base itself close to true white
+  // — the "infected" read needs to come from clearly red veins/bloom against white, not from tinting
+  // the whole sclera tan/beige (that reads as an off-color material, not redness).
+  ctx.fillStyle = "#fdfbfa";
   ctx.fillRect(0, 0, size, size);
   const vGrad = ctx.createLinearGradient(0, 0, 0, size);
-  vGrad.addColorStop(0.0, "#e9d6d3");
+  vGrad.addColorStop(0.0, "#f3ded9");
   vGrad.addColorStop(0.32, "#fdf9f8");
   vGrad.addColorStop(0.5, "#ffffff");
   vGrad.addColorStop(0.68, "#fdf9f8");
-  vGrad.addColorStop(1.0, "#e9d6d3");
+  vGrad.addColorStop(1.0, "#f3ded9");
   ctx.fillStyle = vGrad;
   ctx.fillRect(0, 0, size, size);
-  // A faint cool bloom over the very front so the sclera around the iris looks glossy, not chalky.
-  const bloom = ctx.createRadialGradient(size / 2, size / 2, size * 0.04, size / 2, size / 2, size * 0.42);
-  bloom.addColorStop(0, "rgba(240, 248, 255, 0.55)");
-  bloom.addColorStop(1, "rgba(240, 248, 255, 0)");
+  // A strong red bloom over the front, near the iris — the hallmark of conjunctivitis is redness
+  // that's worst right at the limbus and fades outward. Pushed well past "warm tint" into visibly
+  // red, since strong scene lighting (needed to keep the rest of the sclera bright white) otherwise
+  // washes out anything subtler.
+  const bloom = ctx.createRadialGradient(size / 2, size / 2, size * 0.02, size / 2, size / 2, size * 0.48);
+  bloom.addColorStop(0, "rgba(215, 15, 30, 0.75)");
+  bloom.addColorStop(0.45, "rgba(220, 30, 40, 0.4)");
+  bloom.addColorStop(0.8, "rgba(220, 40, 50, 0.12)");
+  bloom.addColorStop(1, "rgba(220, 40, 50, 0)");
   ctx.fillStyle = bloom;
   ctx.fillRect(0, 0, size, size);
 
-  // Veins: a branching capillary is more convincing than a single stroke, so each root spawns a
-  // main curve plus a couple of thinner offshoots. Alpha and width scale down near the center.
-  function centralFade(y: number): number {
-    // 0 at the exact front center, up to 1 out at the equator band edges.
-    const d = Math.abs(y - size / 2) / (size / 2);
-    return Math.min(1, d / 0.32);
+  // A handful of thick, engorged vessels radiating from near the iris edge outward — "ciliary
+  // injection," the vessel pattern that actually reads as an infected/irritated eye rather than just
+  // scattered noise. Drawn first so the finer capillary web layers on top of them.
+  const majorVeinCount = 20;
+  for (let i = 0; i < majorVeinCount; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const startR = size * (0.1 + Math.random() * 0.06);
+    const endR = size * (0.34 + Math.random() * 0.22);
+    const sx = size / 2 + Math.cos(angle) * startR;
+    const sy = size / 2 + Math.sin(angle) * startR;
+    const wobble = angle + (Math.random() - 0.5) * 0.5;
+    const ex = size / 2 + Math.cos(wobble) * endR;
+    const ey = size / 2 + Math.sin(wobble) * endR;
+    const mx = (sx + ex) / 2 + (Math.random() - 0.5) * size * 0.05;
+    const my = (sy + ey) / 2 + (Math.random() - 0.5) * size * 0.05;
+    ctx.strokeStyle = `rgba(200, 8, 20, ${0.6 + Math.random() * 0.35})`;
+    ctx.lineWidth = 2 + Math.random() * 2.8;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.quadraticCurveTo(mx, my, ex, ey);
+    ctx.stroke();
   }
-  const veinCount = 90;
+
+  // Dense fine capillary web: a branching red vein is more convincing than a single stroke, so each
+  // root spawns a main curve plus a couple of thinner offshoots. Unlike a healthy eye, density and
+  // alpha stay high right up to the iris edge instead of fading out near the center.
+  const veinCount = 220;
   for (let i = 0; i < veinCount; i++) {
     const band = Math.random() < 0.5 ? -1 : 1;
-    let sy = size / 2 + band * (size * 0.06 + Math.random() * size * 0.4);
+    let sy = size / 2 + band * (size * 0.03 + Math.random() * size * 0.44);
     let sx = Math.random() * size;
-    const fade = 0.25 + 0.75 * centralFade(sy);
-    const warm = Math.random() > 0.45;
-    const baseAlpha = (0.08 + Math.random() * 0.22) * fade;
-    const branches = 1 + (Math.random() < 0.6 ? 1 : 0) + (Math.random() < 0.3 ? 1 : 0);
+    const baseAlpha = 0.32 + Math.random() * 0.45;
+    const branches = 1 + (Math.random() < 0.65 ? 1 : 0) + (Math.random() < 0.35 ? 1 : 0);
     for (let b = 0; b < branches; b++) {
       const angle = Math.random() * Math.PI * 2;
-      const len = size * (0.03 + Math.random() * 0.14);
+      const len = size * (0.025 + Math.random() * 0.12);
       const ex = sx + Math.cos(angle) * len;
       const ey = sy + Math.sin(angle) * len;
       const mx = (sx + ex) / 2 + (Math.random() - 0.5) * len * 0.7;
       const my = (sy + ey) / 2 + (Math.random() - 0.5) * len * 0.7;
-      const a = baseAlpha * (b === 0 ? 1 : 0.6);
-      ctx.strokeStyle = warm
-        ? `rgba(214, 66, 92, ${a})`
-        : `rgba(236, 128, 150, ${a})`;
-      ctx.lineWidth = (b === 0 ? 0.5 : 0.3) + Math.random() * (b === 0 ? 1.1 : 0.5);
+      const a = baseAlpha * (b === 0 ? 1 : 0.65);
+      const deep = Math.random() > 0.4;
+      ctx.strokeStyle = deep
+        ? `rgba(185, 5, 20, ${a})`
+        : `rgba(225, 35, 50, ${a})`;
+      ctx.lineWidth = (b === 0 ? 0.9 : 0.5) + Math.random() * (b === 0 ? 1.6 : 0.8);
       ctx.lineCap = "round";
       ctx.beginPath();
       ctx.moveTo(sx, sy);
