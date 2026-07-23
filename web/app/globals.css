@@ -546,6 +546,11 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 }
 .eye-btn:hover { background: rgba(255, 255, 255, 0.85); }
 .eye-btn-icon { font-size: 44px; }
+.eye-orb {
+  width: 132px;
+  height: 132px;
+  pointer-events: none;
+}
 .eye-btn-label {
   font-size: 15px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em;
 }

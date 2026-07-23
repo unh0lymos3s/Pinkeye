@@ -5,6 +5,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import EngagementPicker from "./EngagementPicker";
+import EyeOrb from "./EyeOrb";
 import { createEngagement, createRun } from "../lib/api";
 import { useEngagement } from "../lib/useEngagement";
 import { useLastRun } from "../lib/useLastRun";
@@ -70,7 +71,7 @@ export default function Home() {
         </div>
 
         <Link href="/map" className="eye-btn">
-          <span className="eye-btn-icon">◉</span>
+          <EyeOrb />
           <span className="eye-btn-label">The eye</span>
         </Link>
 
