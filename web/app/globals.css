@@ -506,7 +506,7 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 40px;
+  gap: 52px;               /* widened from 40px so the larger, overflowing eye clears its neighbors */
   flex-wrap: wrap;
 }
 .toggle-box {
@@ -534,9 +534,11 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 .toggle-panel .card { flex: 1; min-width: 320px; }
 
 .eye-btn {
+  position: relative;            /* anchor for the overflowing orb */
+  overflow: visible;             /* let the orb break past the white square's edges */
   width: 190px; height: 190px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 10px;
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+  padding-bottom: 22px;          /* seat the label near the bottom, orb owns the rest */
   border-radius: var(--radius-lg);
   background: #ffffff;
   color: var(--brand);
@@ -546,10 +548,18 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
 }
 .eye-btn:hover { background: rgba(255, 255, 255, 0.85); }
 .eye-btn-icon { font-size: 44px; }
+/* The orb is rendered larger than its 190px button and pinned so its upper third escapes above the
+   white square — the eye that won't stay in its frame. pointer-events:none keeps clicks on the Link. */
 .eye-orb {
-  width: 132px;
-  height: 132px;
+  position: absolute;
+  left: 50%;
+  top: 0;
+  transform: translate(-50%, -34%);
+  width: 224px;
+  height: 224px;
   pointer-events: none;
+  z-index: 1;
+  filter: drop-shadow(0 10px 22px rgba(255, 45, 160, 0.28));
 }
 .eye-btn-label {
   font-size: 15px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em;

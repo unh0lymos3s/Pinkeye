@@ -1,71 +1,109 @@
 "use client";
 // A real 3D eyeball (not a flat icon) that tracks the cursor — the one deliberate departure from
 // the rest of the app's flat, shadow-free "shocking pink + white" design system. Sits inside "The
-// eye" landing button in place of the plain glyph. Bare orb only: no eyelid, no socket.
+// eye" landing button in place of the plain glyph, and is rendered larger than its container so it
+// visibly breaks out of the white square (see globals.css .eye-orb). Bare orb only: no eyelid.
 //
 // Scene graph:
 //   scene
-//   ├─ ambient + directional light
-//   ├─ sclera (static sphere, procedurally veined texture)
-//   ├─ highlight (static "wet" catchlight dot)
+//   ├─ ambient + directional key + soft fill light
+//   ├─ sclera (static sphere, procedurally veined texture with a tone gradient)
+//   ├─ highlight (static "wet" catchlight — fixed to the light, not the gaze)
 //   └─ irisGroup (rotates to track the cursor)
-//      ├─ iris (flat disc, radial fiber texture, brand pink)
-//      └─ pupil (flat black disc)
+//      ├─ iris (flat disc, radial-fiber + limbal-ring texture, brand pink)
+//      ├─ pupil (flat black disc)
+//      └─ cornea (clear bulged dome — MeshPhysicalMaterial clearcoat — sells the eye as 3D)
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-const SIZE = 132;
+const SIZE = 224; // rendered larger than the 190px button so the orb overflows the white square
 const MAX_DEFLECTION = THREE.MathUtils.degToRad(28); // clamp so the iris never turns past the front hemisphere
-const EASE = 0.12; // lerp factor: eye "settles" onto the cursor instead of snapping
-const NORMALIZE_PX = 420; // cursor distance (px) at which the eye is already at max deflection
+const EASE = 0.11; // lerp factor: eye "settles" onto the cursor instead of snapping
+const NORMALIZE_PX = 460; // cursor distance (px) at which the eye is already at max deflection
 
-// Draws the sclera's vein texture. Veins cluster near the equator (SphereGeometry's default UV
-// wrap puts the visible front — where the iris sits — near the texture's vertical center too, so
-// they're kept sparser there to avoid competing with the iris) and thin out toward the poles.
+// Draws the sclera's texture: a soft tone gradient (real sclera is not a uniform flat white — it
+// warms toward the corners and cools/brightens over the visible front) plus fine, varied, branching
+// veins that cluster near the equator and thin out toward the poles and the central iris zone.
 function makeScleraTexture(): THREE.CanvasTexture {
-  const size = 512;
+  const size = 1024;
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d")!;
 
-  ctx.fillStyle = "#fbf3f1";
+  // SphereGeometry's default UV wrap puts the visible front (where the iris sits) near the texture's
+  // center, and the top/bottom poles at the vertical edges. Shade the center clean and cool, the
+  // vertical extents warmer, so the front reads bright/wet and the corners read fleshy.
+  ctx.fillStyle = "#fbf5f4";
+  ctx.fillRect(0, 0, size, size);
+  const vGrad = ctx.createLinearGradient(0, 0, 0, size);
+  vGrad.addColorStop(0.0, "#e9d6d3");
+  vGrad.addColorStop(0.32, "#fdf9f8");
+  vGrad.addColorStop(0.5, "#ffffff");
+  vGrad.addColorStop(0.68, "#fdf9f8");
+  vGrad.addColorStop(1.0, "#e9d6d3");
+  ctx.fillStyle = vGrad;
+  ctx.fillRect(0, 0, size, size);
+  // A faint cool bloom over the very front so the sclera around the iris looks glossy, not chalky.
+  const bloom = ctx.createRadialGradient(size / 2, size / 2, size * 0.04, size / 2, size / 2, size * 0.42);
+  bloom.addColorStop(0, "rgba(240, 248, 255, 0.55)");
+  bloom.addColorStop(1, "rgba(240, 248, 255, 0)");
+  ctx.fillStyle = bloom;
   ctx.fillRect(0, 0, size, size);
 
-  const veinCount = 55;
+  // Veins: a branching capillary is more convincing than a single stroke, so each root spawns a
+  // main curve plus a couple of thinner offshoots. Alpha and width scale down near the center.
+  function centralFade(y: number): number {
+    // 0 at the exact front center, up to 1 out at the equator band edges.
+    const d = Math.abs(y - size / 2) / (size / 2);
+    return Math.min(1, d / 0.32);
+  }
+  const veinCount = 90;
   for (let i = 0; i < veinCount; i++) {
-    // Bias vertically toward the equator band; keep clear of the very center where the iris sits.
     const band = Math.random() < 0.5 ? -1 : 1;
-    const sy = size / 2 + band * (size * 0.08 + Math.random() * size * 0.32);
-    const sx = Math.random() * size;
-    const angle = Math.random() * Math.PI * 2;
-    const len = size * (0.05 + Math.random() * 0.16);
-    const ex = sx + Math.cos(angle) * len;
-    const ey = sy + Math.sin(angle) * len;
-    const mx = (sx + ex) / 2 + (Math.random() - 0.5) * len * 0.6;
-    const my = (sy + ey) / 2 + (Math.random() - 0.5) * len * 0.6;
-
-    const warm = Math.random() > 0.5;
-    const alpha = 0.15 + Math.random() * 0.3;
-    ctx.strokeStyle = warm
-      ? `rgba(230, 60, 90, ${alpha})`
-      : `rgba(255, 130, 150, ${alpha})`;
-    ctx.lineWidth = 0.4 + Math.random() * 1.2;
-    ctx.beginPath();
-    ctx.moveTo(sx, sy);
-    ctx.quadraticCurveTo(mx, my, ex, ey);
-    ctx.stroke();
+    let sy = size / 2 + band * (size * 0.06 + Math.random() * size * 0.4);
+    let sx = Math.random() * size;
+    const fade = 0.25 + 0.75 * centralFade(sy);
+    const warm = Math.random() > 0.45;
+    const baseAlpha = (0.08 + Math.random() * 0.22) * fade;
+    const branches = 1 + (Math.random() < 0.6 ? 1 : 0) + (Math.random() < 0.3 ? 1 : 0);
+    for (let b = 0; b < branches; b++) {
+      const angle = Math.random() * Math.PI * 2;
+      const len = size * (0.03 + Math.random() * 0.14);
+      const ex = sx + Math.cos(angle) * len;
+      const ey = sy + Math.sin(angle) * len;
+      const mx = (sx + ex) / 2 + (Math.random() - 0.5) * len * 0.7;
+      const my = (sy + ey) / 2 + (Math.random() - 0.5) * len * 0.7;
+      const a = baseAlpha * (b === 0 ? 1 : 0.6);
+      ctx.strokeStyle = warm
+        ? `rgba(214, 66, 92, ${a})`
+        : `rgba(236, 128, 150, ${a})`;
+      ctx.lineWidth = (b === 0 ? 0.5 : 0.3) + Math.random() * (b === 0 ? 1.1 : 0.5);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(mx, my, ex, ey);
+      ctx.stroke();
+      // walk the branch root outward so offshoots trail off the main line
+      sx = mx;
+      sy = my;
+    }
   }
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
   texture.needsUpdate = true;
   return texture;
 }
 
-// Draws the iris's radial fiber texture: a dark-to-brand-pink gradient plus thin radial fibers.
+// Draws the iris texture in the brand-pink family with real anatomical structure: a multi-stop
+// radial gradient that shifts across several pink/magenta tones (not one flat pink), angular color
+// variation (wedge sectors of lighter/deeper pink), a lighter collarette ring around the pupil,
+// dense radial fibers in both dark and light, and — the key "reads as human" cue — a dark limbal
+// ring baked in at the outer edge.
 function makeIrisTexture(): THREE.CanvasTexture {
-  const size = 256;
+  const size = 512;
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
@@ -74,29 +112,95 @@ function makeIrisTexture(): THREE.CanvasTexture {
   const cy = size / 2;
   const r = size / 2;
 
-  const gradient = ctx.createRadialGradient(cx, cy, r * 0.08, cx, cy, r);
-  gradient.addColorStop(0, "#c21a76");
-  gradient.addColorStop(1, "#ff2da0");
-  ctx.fillStyle = gradient;
+  // Base radial gradient: dark magenta pupil margin → dominant brand pink → hot-pink highlight band
+  // → darkening toward the limbus → dark limbal ring. Pink stays the unambiguous dominant hue.
+  const g = ctx.createRadialGradient(cx, cy, r * 0.06, cx, cy, r);
+  g.addColorStop(0.0, "#7d0d4b");
+  g.addColorStop(0.16, "#c21a76");
+  g.addColorStop(0.4, "#ff2da0"); // brand pink, the dominant tone
+  g.addColorStop(0.62, "#ff56b3");
+  g.addColorStop(0.8, "#d8237f");
+  g.addColorStop(0.92, "#5c0a37");
+  g.addColorStop(0.98, "#26031a");
+  g.addColorStop(1.0, "#1a0212");
+  ctx.fillStyle = g;
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.fill();
 
-  const fiberCount = 110;
+  // Angular color variation: soft wedge sectors alternating a lighter and a deeper pink, so the
+  // iris has hue/tone variation around its circumference rather than perfect radial symmetry.
+  const sectors = 22;
+  for (let i = 0; i < sectors; i++) {
+    const a0 = (i / sectors) * Math.PI * 2 + Math.random() * 0.1;
+    const a1 = a0 + (Math.PI * 2) / sectors + Math.random() * 0.08;
+    const light = i % 2 === 0;
+    ctx.fillStyle = light
+      ? `rgba(255, 138, 205, ${0.05 + Math.random() * 0.07})`
+      : `rgba(150, 18, 92, ${0.06 + Math.random() * 0.08})`;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r * 0.9, a0, a1);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Radial fibers: dense, thin, both darker-than-base and lighter-than-base for depth.
+  const fiberCount = 240;
   for (let i = 0; i < fiberCount; i++) {
-    const angle = (i / fiberCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.15;
-    const inner = r * (0.15 + Math.random() * 0.1);
-    const outer = r * (0.75 + Math.random() * 0.22);
-    ctx.strokeStyle = `rgba(20, 4, 14, ${0.08 + Math.random() * 0.14})`;
-    ctx.lineWidth = 0.6 + Math.random() * 0.8;
+    const angle = (i / fiberCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.14;
+    const inner = r * (0.2 + Math.random() * 0.12);
+    const outer = r * (0.72 + Math.random() * 0.18);
+    const light = Math.random() > 0.55;
+    ctx.strokeStyle = light
+      ? `rgba(255, 170, 220, ${0.05 + Math.random() * 0.12})`
+      : `rgba(28, 4, 18, ${0.07 + Math.random() * 0.16})`;
+    ctx.lineWidth = 0.5 + Math.random() * 0.9;
+    const midR = (inner + outer) / 2;
+    const jitter = (Math.random() - 0.5) * 0.06;
     ctx.beginPath();
     ctx.moveTo(cx + Math.cos(angle) * inner, cy + Math.sin(angle) * inner);
-    ctx.lineTo(cx + Math.cos(angle) * outer, cy + Math.sin(angle) * outer);
+    ctx.quadraticCurveTo(
+      cx + Math.cos(angle + jitter) * midR,
+      cy + Math.sin(angle + jitter) * midR,
+      cx + Math.cos(angle) * outer,
+      cy + Math.sin(angle) * outer
+    );
     ctx.stroke();
   }
 
+  // Collarette: the slightly raised, lighter ring where the pupillary and ciliary zones meet.
+  ctx.strokeStyle = "rgba(255, 150, 210, 0.35)";
+  ctx.lineWidth = r * 0.03;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.32, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // A few crypts/blotches near the pupil for organic irregularity.
+  for (let i = 0; i < 14; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const rr = r * (0.24 + Math.random() * 0.14);
+    ctx.fillStyle = `rgba(60, 6, 38, ${0.1 + Math.random() * 0.14})`;
+    ctx.beginPath();
+    ctx.ellipse(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, r * 0.02 + Math.random() * r * 0.03, r * 0.015 + Math.random() * r * 0.02, a, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Explicit dark limbal ring at the very edge — the single most important "human eye" cue.
+  ctx.strokeStyle = "rgba(14, 1, 9, 0.85)";
+  ctx.lineWidth = r * 0.055;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.955, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(14, 1, 9, 0.4)";
+  ctx.lineWidth = r * 0.03;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.9, 0, Math.PI * 2);
+  ctx.stroke();
+
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
   texture.needsUpdate = true;
   return texture;
 }
@@ -131,52 +235,93 @@ export default function EyeOrb() {
     const key = new THREE.DirectionalLight(0xffffff, 3.2);
     key.position.set(-1.2, 1.5, 2);
     scene.add(key);
+    // A soft fill from the opposite side keeps the shaded side of the sphere from going muddy and
+    // gives the glossy cornea a second, subtler glint.
+    const fill = new THREE.DirectionalLight(0xffe6f2, 0.9);
+    fill.position.set(1.6, -0.6, 1.2);
+    scene.add(fill);
 
     const scleraTexture = makeScleraTexture();
-    const scleraGeometry = new THREE.SphereGeometry(1, 48, 48);
+    const scleraGeometry = new THREE.SphereGeometry(1, 64, 64);
     const scleraMaterial = new THREE.MeshStandardMaterial({
       map: scleraTexture,
-      roughness: 0.35,
+      roughness: 0.28,
       metalness: 0,
     });
     const sclera = new THREE.Mesh(scleraGeometry, scleraMaterial);
     scene.add(sclera);
 
     const irisTexture = makeIrisTexture();
-    const irisGeometry = new THREE.CircleGeometry(0.42, 32);
+    const irisGeometry = new THREE.CircleGeometry(0.42, 48);
     const irisMaterial = new THREE.MeshStandardMaterial({
       map: irisTexture,
-      roughness: 0.3,
+      roughness: 0.42,
       metalness: 0,
     });
     // The sclera sphere has radius 1, so anything meant to sit "on" its front surface must stay
-    // outside that radius or the sphere's own curved shell occludes it. Offsetting the iris/pupil
-    // *meshes* (not the group) past z=1 and rotating the *group* around the origin — rather than
-    // offsetting the group and rotating it around its own off-center position — means every point
-    // on the flat iris disc keeps a world-space distance from the origin of at least its z-offset,
-    // regardless of rotation angle (distance from the rotation center is rotation-invariant), so it
-    // never dips back inside the sclera at any gaze angle within the clamp.
+    // outside that radius or the sphere's own curved shell occludes it. Offsetting the iris/pupil/
+    // cornea *meshes* (not the group) past z=1 and rotating the *group* around the origin — rather
+    // than offsetting the group and rotating it around its own off-center position — means every
+    // point on those meshes keeps a world-space distance from the origin of at least its offset,
+    // regardless of rotation angle (distance from the rotation center is rotation-invariant), so
+    // nothing ever dips back inside the sclera at any gaze angle within the clamp.
     const iris = new THREE.Mesh(irisGeometry, irisMaterial);
-    iris.position.z = 1.06;
+    iris.position.z = 1.02;
 
-    const pupilGeometry = new THREE.CircleGeometry(0.16, 32);
-    const pupilMaterial = new THREE.MeshBasicMaterial({ color: 0x0a0a0a });
+    const pupilGeometry = new THREE.CircleGeometry(0.15, 48);
+    const pupilMaterial = new THREE.MeshBasicMaterial({ color: 0x050505 });
     const pupil = new THREE.Mesh(pupilGeometry, pupilMaterial);
-    pupil.position.z = 1.08;
+    pupil.position.z = 1.035;
+
+    // Corneal bulge: a clear, glassy spherical cap doming over the iris — the biggest missing 3D
+    // cue. We use MeshPhysicalMaterial with a strong clearcoat specular lobe + very low base opacity
+    // (rather than true `transmission`) on purpose: transmission needs an extra opaque render pass
+    // into a render target, which is fragile against this canvas's transparent (alpha) background —
+    // clearcoat gives the same wet-glass bulge/highlight/depth read while rendering reliably over a
+    // transparent clear color. ior 1.376 is the real cornea's index of refraction (drives the
+    // Fresnel edge brightening). The cap is built around three's +Y pole then rotated to face +Z.
+    const CORNEA_R = 0.85;
+    const corneaGeometry = new THREE.SphereGeometry(CORNEA_R, 48, 32, 0, Math.PI * 2, 0, 0.63);
+    corneaGeometry.rotateX(Math.PI / 2); // point the cap toward +Z (the viewer / iris)
+    const corneaMaterial = new THREE.MeshPhysicalMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.16,
+      roughness: 0.05,
+      metalness: 0,
+      clearcoat: 1,
+      clearcoatRoughness: 0.04,
+      ior: 1.376,
+      reflectivity: 0.6,
+      depthWrite: false,
+      side: THREE.FrontSide,
+    });
+    const cornea = new THREE.Mesh(corneaGeometry, corneaMaterial);
+    cornea.position.z = 0.332; // apex ends up at ~1.18, rim (r~0.5) sits just past the iris edge
+    cornea.renderOrder = 1; // draw the transparent dome after the opaque iris/pupil beneath it
 
     const irisGroup = new THREE.Group();
-    irisGroup.add(iris, pupil);
+    irisGroup.add(iris, pupil, cornea);
     scene.add(irisGroup);
 
-    const highlightGeometry = new THREE.CircleGeometry(0.05, 16);
+    // Catchlight: a crisp "wet" reflection of the light source. Kept in the scene (not the iris
+    // group) and static, because a real corneal reflection stays fixed to the light, not the gaze.
+    const highlightGeometry = new THREE.CircleGeometry(0.07, 24);
     const highlightMaterial = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.92,
     });
     const highlight = new THREE.Mesh(highlightGeometry, highlightMaterial);
-    highlight.position.set(-0.1, 0.12, 1.07);
+    highlight.position.set(-0.16, 0.2, 1.22);
+    highlight.renderOrder = 2;
     scene.add(highlight);
+    // A tiny secondary sparkle for a more liquid look.
+    const spark = new THREE.Mesh(highlightGeometry, highlightMaterial);
+    spark.scale.setScalar(0.4);
+    spark.position.set(0.08, -0.02, 1.2);
+    spark.renderOrder = 2;
+    scene.add(spark);
 
     // Native listener + a plain ref (not React state) so mousemove never triggers a re-render.
     const mouseTarget = { x: 0, y: 0 };
@@ -209,6 +354,8 @@ export default function EyeOrb() {
       irisTexture.dispose();
       pupilGeometry.dispose();
       pupilMaterial.dispose();
+      corneaGeometry.dispose();
+      corneaMaterial.dispose();
       highlightGeometry.dispose();
       highlightMaterial.dispose();
       renderer.dispose();
