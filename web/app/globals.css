@@ -35,9 +35,10 @@
   --radius-sm: 12px;
   --radius-lg: 24px;
 
-  /* Monospaced everywhere for the terminal aesthetic. */
-  --font: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
-  --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  /* Monospaced everywhere for the terminal aesthetic. --font-ibm-plex-mono is injected by
+     next/font/google on <html> in layout.tsx; the named fallbacks cover a build without it. */
+  --font: var(--font-ibm-plex-mono), "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --mono: var(--font-ibm-plex-mono), "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -48,6 +49,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
+  font-weight: 500;
   -webkit-font-smoothing: antialiased;
   min-height: 100vh;
   font-size: 14px;
