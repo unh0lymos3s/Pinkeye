@@ -18,3 +18,4 @@ web/next-env.d.ts
 
 # Claude Code local tooling state (worktrees, caches) — not project source
 .claude/
+.superpowers/
