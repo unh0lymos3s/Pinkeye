@@ -53,7 +53,6 @@ export default function Dashboard() {
       <div className="page-head">
         <div>
           <h1>Dashboard</h1>
-          <p className="page-sub">Live KPIs, severity breakdown, and correlated attack chains for the selected engagement.</p>
         </div>
         <div className="row">
           <EngagementPicker engagements={engagements} selected={selected} onSelect={select} />

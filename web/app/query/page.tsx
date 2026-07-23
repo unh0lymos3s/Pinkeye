@@ -53,7 +53,6 @@ export default function QueryPage() {
       <div className="page-head">
         <div>
           <h1>Query</h1>
-          <p className="page-sub">Filter normalized findings, or run read-only Cypher directly against the knowledge graph.</p>
         </div>
         <EngagementPicker engagements={engagements} selected={selected} onSelect={select} />
       </div>

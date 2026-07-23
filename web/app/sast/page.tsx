@@ -8,7 +8,7 @@
 // can only ever add a local source path — never a network target or an offensive capability.
 import { useEffect, useMemo, useRef, useState } from "react";
 import EngagementPicker from "../EngagementPicker";
-import { Callout, SectionTitle, SeverityBadge } from "../ui";
+import { SectionTitle, SeverityBadge } from "../ui";
 import {
   createRun,
   fetchTranscript,
@@ -183,11 +183,6 @@ export default function SastPage() {
       <div className="page-head">
         <div>
           <h1>Static Analysis (SAST)</h1>
-          <p className="page-sub">
-            Upload a codebase and the harness extracts it, authorizes it in the engagement scope, and
-            runs the static-analysis specialist over it — code vulnerabilities, secrets, and vulnerable
-            dependencies — streaming findings live.
-          </p>
         </div>
         {view.status && (
           <span className="live">
@@ -197,15 +192,7 @@ export default function SastPage() {
         )}
       </div>
 
-      <div style={{ margin: "18px 0" }}>
-        <Callout kind="danger">
-          <strong>Authorized code only.</strong> Upload source you own or are contracted in writing to
-          assess. Uploading a codebase adds its extracted path to the engagement&apos;s signed scope so
-          the analyzers may read it (read-only) — it never grants any network or offensive capability.
-        </Callout>
-      </div>
-
-      <SectionTitle>1 · Engagement &amp; codebase</SectionTitle>
+      <SectionTitle>Engagement &amp; codebase</SectionTitle>
       <div className="card card-pad">
         <div className="row" style={{ alignItems: "flex-end", flexWrap: "wrap" }}>
           <div className="field" style={{ minWidth: 220 }}>
@@ -276,7 +263,7 @@ export default function SastPage() {
         )}
       </div>
 
-      <SectionTitle>2 · Analyzers</SectionTitle>
+      <SectionTitle>Analyzers</SectionTitle>
       <div className="card card-pad">
         <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
           {SAST_TOOLS.map((name) => {

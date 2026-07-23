@@ -8,7 +8,7 @@
 // engagement's signed scope before anything executes.
 import { useEffect, useMemo, useRef, useState } from "react";
 import EngagementPicker from "../EngagementPicker";
-import { Callout, SectionTitle, SeverityBadge } from "../ui";
+import { SectionTitle, SeverityBadge } from "../ui";
 import {
   createRun,
   fetchTranscript,
@@ -227,10 +227,6 @@ export default function AgentChat() {
       <div className="page-head">
         <div>
           <h1>Agent Chat</h1>
-          <p className="page-sub">
-            Set an objective and watch the planner reason, choose tools, and stream findings. Cross-run
-            memory feeds the agent what it already knows so each run builds on the last.
-          </p>
         </div>
         {view.status && (
           <span className="live">
@@ -238,15 +234,6 @@ export default function AgentChat() {
             {view.status}
           </span>
         )}
-      </div>
-
-      <div style={{ margin: "18px 0" }}>
-        <Callout kind="danger">
-          <strong>Authorized, controlled use only.</strong> Pinkeye is for ethical security
-          research on assets you own or are contracted in writing to test. Every tool call is checked
-          against the engagement's signed scope before it runs — the objective below is guidance, not
-          authorization, and cannot widen scope.
-        </Callout>
       </div>
 
       <SectionTitle>Objective &amp; scope</SectionTitle>

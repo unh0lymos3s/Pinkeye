@@ -81,9 +81,6 @@ export default function MapPage() {
       <div className="page-head">
         <div>
           <h1>Knowledge Graph</h1>
-          <p className="page-sub">
-            Hosts, ports, services, and findings, persisted across runs for the active engagement.
-          </p>
         </div>
         <label className="live" style={{ cursor: "pointer" }}>
           <input type="checkbox" checked={full} onChange={(e) => setFull(e.target.checked)} />

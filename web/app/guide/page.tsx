@@ -48,19 +48,7 @@ export default function Guide() {
       <div className="page-head">
         <div>
           <h1>User Guide</h1>
-          <p className="page-sub">
-            How Pinkeye works and how to drive it — from a scoped engagement to a finished report.
-          </p>
         </div>
-      </div>
-
-      <div style={{ marginTop: 16 }}>
-        <Callout kind="danger">
-          <strong>Authorized use only.</strong> Run only against assets you own or are contracted to test.
-          Every run is bound to a <strong>signed scope</strong> the harness enforces in code before any tool
-          executes. Intrusive capabilities (exploitation, credential attacks) stay off unless explicitly
-          authorized in that scope.
-        </Callout>
       </div>
 
       <SectionTitle>What this is</SectionTitle>
