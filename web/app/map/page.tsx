@@ -142,7 +142,7 @@ export default function MapPage() {
           </div>
         ) : (
           <div className="dim" style={{ textAlign: "center", padding: "8px 0 2px", fontSize: 11.5 }}>
-            drag to pan · scroll to zoom · double-click to reset
+            drag to pan · scroll or +/− to zoom · double-click to reset · click a node to collapse/expand
           </div>
         )}
       </div>

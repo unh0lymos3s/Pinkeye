@@ -329,8 +329,33 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
   background: var(--bg);
 }
 /* In fullscreen, the graph area grows to fill the remaining height. */
-.graph-fullscreen > svg { flex: 1; min-height: 0; }
+.graph-fullscreen > .graph-view-wrap { flex: 1; min-height: 0; }
 .graph-fs-exit { align-self: flex-end; margin: 0 0 8px 0; }
+
+.graph-zoom-controls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 1;
+}
+.graph-zoom-controls button {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(0, 0, 0, 0.25);
+  color: #ffffff;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.graph-zoom-controls button:hover { background: rgba(0, 0, 0, 0.4); border-color: #ffffff; }
+.graph-zoom-controls button:last-child { font-size: 13px; }
 
 /* ---- Pipeline: operator-skipped stage (tools deselected in the tool library) ---- */
 /* Distinct from .gated (scope-denied): dashed outline + strike so it reads as "switched off". */
@@ -503,18 +528,34 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
   padding: 32px 24px;
 }
 
-/* ASCII/block-art wordmark above the launcher row. Each line is its own row (see page.tsx) so the
-   wave can ripple through them via a staggered animation-delay instead of moving as one block. */
+/* Bounds the wordmark's available width — the SVG's viewBox scaling (see page.tsx) fills this
+   exactly at any size, so the art never wraps or clips and scales cleanly with the window or
+   browser zoom, with no JS measuring needed. */
+.ascii-banner-wrap {
+  width: 100%;
+  max-width: min(92vw, 460px);
+  display: flex;
+  justify-content: center;
+}
+
+/* ASCII/block-art wordmark above the launcher row, drawn as vector rects (see the glyphRects()
+   bitmap font in page.tsx) rather than real box-drawing characters. Rendering those characters as
+   text is unreliable — browsers fall back to whatever installed font has glyphs for them, and
+   that font's cell metrics don't line up with the base monospace font, desyncing the grid
+   differently per OS/browser/zoom. Vector rects sidestep fonts entirely: each line is its own
+   full-width <svg> (see page.tsx), stacked here as plain HTML flow so the wave animation below is
+   a normal CSS transform on an HTML box — not a transform nested inside SVG's own coordinate
+   system, whose semantics (transform-box) have historically been inconsistent across browsers. */
 .ascii-banner {
-  margin: 0;
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.15;
-  font-weight: 700;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  fill: var(--text);
 }
 .ascii-row {
-  white-space: pre;
+  display: block;
+  width: 100%;
+  height: auto;
   animation: ascii-wave 30s ease-in-out infinite;
 }
 /* The bounce occupies only the first ~1.8s of the 30s cycle (0-6%); the row then sits flat for the
@@ -580,8 +621,8 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 250px;
-  height: 250px;
+  width: 310px;
+  height: 310px;
   pointer-events: none;
   z-index: 1;
   filter: drop-shadow(0 10px 22px rgba(255, 45, 160, 0.28));

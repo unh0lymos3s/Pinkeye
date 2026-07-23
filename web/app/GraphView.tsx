@@ -86,13 +86,29 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
   const [hover, setHover] = useState<string | null>(null);
   const raf = useRef<number>();
 
+  // Collapsible nodes: collapsing a node hides everything only reachable through it, so a
+  // crowded subtree (e.g. a noisy IP's ports/services) can be tucked away without losing the rest
+  // of the map. Keyed by node id, reset whenever the graph identity changes.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
   // Pan/zoom navigation: the viewBox is the "camera". Dragging pans it; the wheel zooms toward the
-  // cursor; double-click resets. Node positions come from the simulation and are unaffected.
+  // cursor; the +/- buttons zoom toward the view center; double-click resets. Node positions come
+  // from the simulation and are unaffected.
   const [view, setView] = useState({ x: 0, y: 0, w: W, h: H });
   const [panning, setPanning] = useState(false);
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
   const resetView = () => setView({ x: 0, y: 0, w: W, h: H });
+
+  // Shared zoom step: `factor` < 1 zooms in. (fx, fy) is the fixed point in [0,1] viewBox-fraction
+  // coordinates — the wheel handler passes the cursor position, the buttons pass the center (0.5).
+  const zoomBy = (factor: number, fx = 0.5, fy = 0.5) => {
+    setView((v) => {
+      const nw = clamp(v.w * factor, W * 0.2, W * 3);
+      const nh = nw * (H / W); // keep the coordinate-space aspect so nodes don't distort
+      return { x: v.x + fx * v.w - fx * nw, y: v.y + fy * v.h - fy * nh, w: nw, h: nh };
+    });
+  };
 
   const onDown = (e: ReactMouseEvent) => {
     drag.current = { sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
@@ -121,17 +137,56 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
       e.preventDefault();
       const rect = svg.getBoundingClientRect();
       const factor = e.deltaY < 0 ? 0.85 : 1.0 / 0.85; // in / out
-      setView((v) => {
-        const nw = clamp(v.w * factor, W * 0.2, W * 3);
-        const nh = nw * (H / W); // keep the coordinate-space aspect so nodes don't distort
-        const fx = (e.clientX - rect.left) / rect.width;
-        const fy = (e.clientY - rect.top) / rect.height;
-        return { x: v.x + fx * v.w - fx * nw, y: v.y + fy * v.h - fy * nh, w: nw, h: nh };
-      });
+      zoomBy(factor, (e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height);
     };
     svg.addEventListener("wheel", onWheel, { passive: false });
     return () => svg.removeEventListener("wheel", onWheel);
   }, []);
+
+  // Children-by-source lookup, used both to know which nodes are collapsible and to compute which
+  // nodes stay visible once some are collapsed.
+  const children = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const e of graph.edges) {
+      if (!m.has(e.source)) m.set(e.source, []);
+      m.get(e.source)!.push(e.target);
+    }
+    return m;
+  }, [graph]);
+
+  const toggleCollapse = (id: string) => {
+    if (!children.get(id)?.length) return; // leaf nodes have nothing to hide
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // A node is visible if some path from a root reaches it without passing through a collapsed
+  // node. BFS from indegree-0 nodes first (the natural roots, e.g. Engagement), then sweeps up any
+  // leftover nodes as fallback roots so disconnected components still render.
+  const visibleIds = useMemo(() => {
+    const indeg = new Map<string, number>();
+    for (const n of graph.nodes) indeg.set(n.id, 0);
+    for (const e of graph.edges) indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1);
+    const visible = new Set<string>();
+    const queue: string[] = graph.nodes.filter((n) => (indeg.get(n.id) ?? 0) === 0).map((n) => n.id);
+    const drain = () => {
+      while (queue.length) {
+        const id = queue.shift()!;
+        if (visible.has(id)) continue;
+        visible.add(id);
+        if (collapsed.has(id)) continue; // don't descend into a collapsed node's children
+        for (const c of children.get(id) || []) if (!visible.has(c)) queue.push(c);
+      }
+    };
+    drain();
+    for (const n of graph.nodes) if (!visible.has(n.id)) queue.push(n.id);
+    drain();
+    return visible;
+  }, [graph, children, collapsed]);
 
   // Seed node positions whenever the graph identity set changes.
   const seed = useMemo(() => graph.nodes.map((n) => n.id).join(","), [graph]);
@@ -149,6 +204,7 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
         vy: 0,
       }))
     );
+    setCollapsed(new Set());
   }, [seed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Force simulation: repulsion between all nodes, spring pull along edges, gentle centering.
@@ -193,97 +249,126 @@ export default function GraphView({ graph, fill = false }: { graph: Graph; fill?
   }, [seed, graph.edges]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pos = new Map(nodes.map((n) => [n.id, n]));
+  const visibleNodes = nodes.filter((n) => visibleIds.has(n.id));
+  const visibleEdges = graph.edges.filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target));
 
   return (
-    <svg
-      ref={svgRef}
-      viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
-      width="100%"
-      // In fullscreen the container drives the size (svg fills it, viewBox keeps it centered);
-      // otherwise the fixed aspect ratio keeps the inline card a sensible height.
-      height={fill ? "100%" : undefined}
-      preserveAspectRatio="xMidYMid meet"
-      onMouseDown={onDown}
-      onMouseMove={onMove}
-      onMouseUp={endPan}
-      onMouseLeave={endPan}
-      onDoubleClick={resetView}
-      style={{
-        display: "block",
-        background: PINK,
-        borderRadius: 8,
-        cursor: panning ? "grabbing" : "grab",
-        touchAction: "none",
-        ...(fill ? { flex: 1, minHeight: 0, height: "100%" } : { aspectRatio: `${W} / ${H}` }),
-      }}
+    <div
+      className="graph-view-wrap"
+      style={fill ? { flex: 1, minHeight: 0, display: "flex", position: "relative" } : { position: "relative" }}
     >
-      {graph.edges.map((e, i) => {
-        const a = pos.get(e.source), b = pos.get(e.target);
-        if (!a || !b) return null;
-        const active = hover && (e.source === hover || e.target === hover);
-        return (
-          <line
-            key={i}
-            x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-            stroke={active ? "rgba(255, 255, 255, 0.8)" : "rgba(255, 255, 255, 0.35)"}
-            strokeWidth={active ? 1.6 : 1}
-          />
-        );
-      })}
-      {nodes.map((n) => {
-        const nc = COLORS[n.label] || COLORS.Node;
-        const active = hover === n.id;
-        const r = n.label === "Finding" ? 9 : 7;
-        const statusColor = STATUS_COLOR[n.status];
-        const gone = n.status === "gone";
-        const dashed = gone || n.status === "changed";
-        const tip = [n.label, n.title].join(": ")
-          + (n.exploitable ? "  ⚠ exploitable" : "")
-          + (n.status ? `  (${n.status})` : "");
-        return (
-          <g
-            key={n.id}
-            onMouseEnter={() => setHover(n.id)}
-            onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
-            style={{ cursor: "default", opacity: gone ? 0.5 : 1 }}
-          >
-            {active && <circle cx={n.x} cy={n.y} r={r + 5} fill={nc.fill} opacity={0.25} />}
-            {/* Exploitable ring: a pulsing white halo flags a proven-exploitable service/endpoint or target device. */}
-            {n.exploitable && (
-              <circle cx={n.x} cy={n.y} r={r + 4} fill="none" stroke={WHITE} strokeWidth={2.2} opacity={0.95} />
-            )}
-            {/* Cross-run status ring: new / changed / gone from the memory engine. */}
-            {statusColor && (
-              <circle
-                cx={n.x}
-                cy={n.y}
-                r={r + (n.exploitable ? 7 : 3)}
-                fill="none"
-                stroke={statusColor}
-                strokeWidth={1.4}
-                strokeDasharray={dashed ? "3 2" : undefined}
-                opacity={0.9}
-              />
-            )}
-            <circle cx={n.x} cy={n.y} r={r} fill={nc.fill} stroke={nc.stroke} strokeWidth={1.5} />
-            {n.exploitable && (
-              <text x={n.x} y={n.y + 3.5} fontSize={9} textAnchor="middle" fill={nc.stroke} fontWeight={700}>
-                !
-              </text>
-            )}
-            <text
-              x={n.x + r + 6}
-              y={n.y + 4}
-              fontSize={11}
-              fill={active ? WHITE : "rgba(255, 255, 255, 0.75)"}
-              style={{ fontFamily: "var(--mono)" }}
+      <svg
+        ref={svgRef}
+        viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
+        width="100%"
+        // In fullscreen the container drives the size (svg fills it, viewBox keeps it centered);
+        // otherwise the fixed aspect ratio keeps the inline card a sensible height.
+        height={fill ? "100%" : undefined}
+        preserveAspectRatio="xMidYMid meet"
+        onMouseDown={onDown}
+        onMouseMove={onMove}
+        onMouseUp={endPan}
+        onMouseLeave={endPan}
+        onDoubleClick={resetView}
+        style={{
+          display: "block",
+          background: PINK,
+          borderRadius: 8,
+          cursor: panning ? "grabbing" : "grab",
+          touchAction: "none",
+          ...(fill ? { flex: 1, minHeight: 0, height: "100%" } : { aspectRatio: `${W} / ${H}` }),
+        }}
+      >
+        {visibleEdges.map((e, i) => {
+          const a = pos.get(e.source), b = pos.get(e.target);
+          if (!a || !b) return null;
+          const active = hover && (e.source === hover || e.target === hover);
+          return (
+            <line
+              key={i}
+              x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+              stroke={active ? "rgba(255, 255, 255, 0.8)" : "rgba(255, 255, 255, 0.35)"}
+              strokeWidth={active ? 1.6 : 1}
+            />
+          );
+        })}
+        {visibleNodes.map((n) => {
+          const nc = COLORS[n.label] || COLORS.Node;
+          const active = hover === n.id;
+          const r = n.label === "Finding" ? 9 : 7;
+          const statusColor = STATUS_COLOR[n.status];
+          const gone = n.status === "gone";
+          const dashed = gone || n.status === "changed";
+          const collapsible = Boolean(children.get(n.id)?.length);
+          const isCollapsed = collapsed.has(n.id);
+          const tip = [n.label, n.title].join(": ")
+            + (n.exploitable ? "  ⚠ exploitable" : "")
+            + (n.status ? `  (${n.status})` : "")
+            + (collapsible ? (isCollapsed ? "  (collapsed — click to expand)" : "  (click to collapse)") : "");
+          return (
+            <g
+              key={n.id}
+              onMouseEnter={() => setHover(n.id)}
+              onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
+              onClick={() => toggleCollapse(n.id)}
+              style={{ cursor: collapsible ? "pointer" : "default", opacity: gone ? 0.5 : 1 }}
             >
-              {n.title}
-            </text>
-            <title>{tip}</title>
-          </g>
-        );
-      })}
-    </svg>
+              {active && <circle cx={n.x} cy={n.y} r={r + 5} fill={nc.fill} opacity={0.25} />}
+              {/* Exploitable ring: a pulsing white halo flags a proven-exploitable service/endpoint or target device. */}
+              {n.exploitable && (
+                <circle cx={n.x} cy={n.y} r={r + 4} fill="none" stroke={WHITE} strokeWidth={2.2} opacity={0.95} />
+              )}
+              {/* Cross-run status ring: new / changed / gone from the memory engine. */}
+              {statusColor && (
+                <circle
+                  cx={n.x}
+                  cy={n.y}
+                  r={r + (n.exploitable ? 7 : 3)}
+                  fill="none"
+                  stroke={statusColor}
+                  strokeWidth={1.4}
+                  strokeDasharray={dashed ? "3 2" : undefined}
+                  opacity={0.9}
+                />
+              )}
+              {/* Collapsed marker: a dashed ring around a node whose subtree is currently hidden. */}
+              {isCollapsed && (
+                <circle cx={n.x} cy={n.y} r={r + 5} fill="none" stroke={WHITE} strokeWidth={1.2} strokeDasharray="2 2" opacity={0.8} />
+              )}
+              <circle cx={n.x} cy={n.y} r={r} fill={nc.fill} stroke={nc.stroke} strokeWidth={1.5} />
+              {n.exploitable && (
+                <text x={n.x} y={n.y + 3.5} fontSize={9} textAnchor="middle" fill={nc.stroke} fontWeight={700}>
+                  !
+                </text>
+              )}
+              <text
+                x={n.x + r + 6}
+                y={n.y + 4}
+                fontSize={11}
+                fill={active ? WHITE : "rgba(255, 255, 255, 0.75)"}
+                style={{ fontFamily: "var(--mono)" }}
+              >
+                {n.title}
+              </text>
+              {/* Collapse/expand badge: only drawn on nodes that actually have children to hide. */}
+              {collapsible && (
+                <g transform={`translate(${n.x + r * 0.6}, ${n.y + r * 0.6})`}>
+                  <circle r={6} fill={PINK} stroke={WHITE} strokeWidth={1} />
+                  <text y={3} textAnchor="middle" fontSize={9} fontWeight={700} fill={WHITE}>
+                    {isCollapsed ? "+" : "−"}
+                  </text>
+                </g>
+              )}
+              <title>{tip}</title>
+            </g>
+          );
+        })}
+      </svg>
+      <div className="graph-zoom-controls">
+        <button type="button" title="Zoom in" onClick={() => zoomBy(0.85)}>+</button>
+        <button type="button" title="Zoom out" onClick={() => zoomBy(1 / 0.85)}>−</button>
+        <button type="button" title="Reset view" onClick={resetView}>⟲</button>
+      </div>
+    </div>
   );
 }
