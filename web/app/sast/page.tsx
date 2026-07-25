@@ -10,10 +10,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import EngagementPicker from "../EngagementPicker";
 import { SectionTitle, SeverityBadge } from "../ui";
 import {
+  ApiAuthError,
   createRun,
   fetchTranscript,
   listTools,
-  runEventsUrl,
+  openRunEventStream,
   uploadSast,
   type RunEvent,
   type SastUpload,
@@ -60,7 +61,7 @@ export default function SastPage() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
 
-  const esRef = useRef<EventSource | null>(null);
+  const streamRef = useRef<AbortController | null>(null);
   const lastSeqRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -88,7 +89,7 @@ export default function SastPage() {
         })
         .catch(() => {});
     }
-    return () => esRef.current?.close();
+    return () => streamRef.current?.abort();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -98,22 +99,29 @@ export default function SastPage() {
   const snykWired = useMemo(() => tools.find((t) => t.name === "semgrep")?.mcp ?? false, [tools]);
 
   function openStream(id: string, after: number) {
-    esRef.current?.close();
-    const es = new EventSource(runEventsUrl(id, after));
-    esRef.current = es;
-    es.onmessage = (e) => {
-      const ev: RunEvent = JSON.parse(e.data);
-      lastSeqRef.current = Math.max(lastSeqRef.current, ev.seq);
-      setEvents((prev) => (prev.some((p) => p.seq === ev.seq) ? prev : [...prev, ev]));
-      if (ev.kind === "status" && TERMINAL.has(ev.data?.status)) {
-        es.close();
-        esRef.current = null;
-      }
-    };
-    es.onerror = () => {
-      es.close();
-      if (esRef.current === es) esRef.current = null;
-    };
+    streamRef.current?.abort();
+    const controller = openRunEventStream(id, after, {
+      onEvent: (ev) => {
+        lastSeqRef.current = Math.max(lastSeqRef.current, ev.seq);
+        setEvents((prev) => (prev.some((p) => p.seq === ev.seq) ? prev : [...prev, ev]));
+        if (ev.kind === "status" && TERMINAL.has(ev.data?.status)) {
+          controller.abort();
+          if (streamRef.current === controller) streamRef.current = null;
+        }
+      },
+      onDone: () => {
+        if (streamRef.current === controller) streamRef.current = null;
+      },
+      onError: (err) => {
+        if (streamRef.current === controller) streamRef.current = null;
+        if (err instanceof ApiAuthError) {
+          setStatus(err.status === 401 ? "authentication required — enter an API key in the nav" : err.message);
+        }
+        // No reconnect-on-drop here, matching the previous EventSource.onerror behavior (which only
+        // closed the connection without retrying).
+      },
+    });
+    streamRef.current = controller;
   }
 
   function pickFile(f: File | null) {

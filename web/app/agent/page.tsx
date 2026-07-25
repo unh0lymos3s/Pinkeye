@@ -10,11 +10,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import EngagementPicker from "../EngagementPicker";
 import { SectionTitle, SeverityBadge } from "../ui";
 import {
+  ApiAuthError,
   createRun,
   fetchTranscript,
   listProfiles,
   listTools,
-  runEventsUrl,
+  openRunEventStream,
   sendReply,
   type Profile,
   type RunEvent,
@@ -82,7 +83,7 @@ export default function AgentChat() {
   const [reply, setReply] = useState("");
   const [sending, setSending] = useState(false);
 
-  const esRef = useRef<EventSource | null>(null);
+  const streamRef = useRef<AbortController | null>(null);
   const lastSeqRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -120,7 +121,7 @@ export default function AgentChat() {
         })
         .catch(() => {});
     }
-    return () => esRef.current?.close();
+    return () => streamRef.current?.abort();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the transcript pinned to the newest message. The chat is uncapped (the whole run shows as
@@ -134,27 +135,36 @@ export default function AgentChat() {
   const stickToBottom = () => bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
 
   function openStream(id: string, after: number) {
-    esRef.current?.close();
-    const es = new EventSource(runEventsUrl(id, after));
-    esRef.current = es;
-    es.onmessage = (e) => {
-      const ev: RunEvent = JSON.parse(e.data);
-      lastSeqRef.current = Math.max(lastSeqRef.current, ev.seq);
-      liveSeqsRef.current.add(ev.seq);
-      setEvents((prev) => (prev.some((p) => p.seq === ev.seq) ? prev : [...prev, ev]));
-      if (ev.kind === "status" && TERMINAL.has(ev.data?.status)) {
-        es.close();
-        esRef.current = null;
-      }
-    };
-    es.onerror = () => {
-      // Socket dropped. Close and, unless the run already ended, resume tailing from the last seq.
-      es.close();
-      if (esRef.current === es) esRef.current = null;
-      setTimeout(() => {
-        if (!esRef.current && !isTerminal(latestRef.current)) openStream(id, lastSeqRef.current);
-      }, 1500);
-    };
+    streamRef.current?.abort();
+    const controller = openRunEventStream(id, after, {
+      onEvent: (ev) => {
+        lastSeqRef.current = Math.max(lastSeqRef.current, ev.seq);
+        liveSeqsRef.current.add(ev.seq);
+        setEvents((prev) => (prev.some((p) => p.seq === ev.seq) ? prev : [...prev, ev]));
+        if (ev.kind === "status" && TERMINAL.has(ev.data?.status)) {
+          controller.abort();
+          if (streamRef.current === controller) streamRef.current = null;
+        }
+      },
+      onDone: () => {
+        if (streamRef.current === controller) streamRef.current = null;
+      },
+      onError: (err) => {
+        if (streamRef.current === controller) streamRef.current = null;
+        if (err instanceof ApiAuthError) {
+          // Retrying with the same missing/invalid key would just fail again — surface it and stop
+          // (the operator fixes the key via the nav, which triggers a fresh launch/reconnect).
+          setStatus(err.status === 401 ? "authentication required — enter an API key in the nav" : err.message);
+          return;
+        }
+        // Connection dropped for some other reason. Resume tailing from the last seq, unless the run
+        // already ended — the same bounded, throttled retry the old EventSource.onerror handler used.
+        setTimeout(() => {
+          if (!streamRef.current && !isTerminal(latestRef.current)) openStream(id, lastSeqRef.current);
+        }, 1500);
+      },
+    });
+    streamRef.current = controller;
   }
 
   // Keep a ref to the latest events for the reconnect timer (closures capture stale state otherwise).
