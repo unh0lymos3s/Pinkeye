@@ -179,9 +179,12 @@ def run_specialist(
     pool: list,
     remaining_calls: int,
     remaining_tokens: int,
-) -> tuple[str, int, int, int]:
+) -> tuple[str, int, int, int, int]:
     """Run one specialist as a nested, context-isolated `run_agent` and return
-    (summary, tool_calls_used, output_tokens, findings) for the orchestrator to fold into its budget.
+    (summary, tool_calls_used, output_tokens, input_tokens, findings) for the orchestrator to fold
+    into its budget. Input tokens are reported alongside output tokens because the token budget
+    charges both — a child that resends a long history costs the tree just as much as one that
+    writes a long answer.
 
     The child is sized to the parent's remaining budget so the whole tree stays bounded, and it runs
     with `nested=True` (no run-level plan/status lifecycle) and `subagent=kind` (every event tagged so
@@ -192,10 +195,11 @@ def run_specialist(
 
     spec = SPECIALISTS.get(kind)
     if spec is None:
-        return (f"unknown specialist '{kind}'", 0, 0, 0)
+        return (f"unknown specialist '{kind}'", 0, 0, 0, 0)
 
     child_budget = Budget(
         max_tool_calls=max(1, remaining_calls),
+        # The parent passes what is left of the *combined* input+output allowance.
         max_output_tokens=max(1, remaining_tokens),
     )
     registry = specialist_registry(kind, pool)
@@ -219,7 +223,7 @@ def run_specialist(
         subagent=kind,
     )
     summary = _specialist_summary(kind, child)
-    return (summary, child.tool_calls_used, child.output_tokens, child.findings)
+    return (summary, child.tool_calls_used, child.output_tokens, child.input_tokens, child.findings)
 
 
 def _specialist_summary(kind: str, child) -> str:

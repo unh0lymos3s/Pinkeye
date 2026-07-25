@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import ipaddress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .config import settings
+from .matching import host_in_domains, ip_in_cidrs
 from .models import Intensity, Scope, is_ip
 
 # Intensity ordering, used to enforce the engagement's ceiling.
@@ -45,21 +45,6 @@ def _signature_valid(scope: Scope) -> bool:
     return hmac.compare_digest(expected, scope.signature)
 
 
-def _target_in_cidrs(target: str, cidrs: list[str]) -> bool:
-    try:
-        addr = ipaddress.ip_address(target)
-    except ValueError:
-        return False
-    for cidr in cidrs:
-        try:
-            if addr in ipaddress.ip_network(cidr, strict=False):
-                return True
-        except ValueError:
-            # A malformed CIDR in the scope must never widen access; skip it.
-            continue
-    return False
-
-
 def _target_host(target: str) -> str:
     """Extract the bare host from a network target for the scope decision.
 
@@ -87,16 +72,6 @@ def _target_host(target: str) -> str:
         host, _, port = t.rpartition(":")
         return host if port.isdigit() else t
     return t
-
-
-def _domain_in_scope(target: str, domains: list[str]) -> bool:
-    host = target.lower().rstrip(".")
-    for allowed in domains:
-        allowed = allowed.lower().lstrip("*.").rstrip(".")
-        # Exact match, or a subdomain of an allowed apex (foo.example.com under example.com).
-        if host == allowed or host.endswith("." + allowed):
-            return True
-    return False
 
 
 def _artifact_in_scope(target: str, artifacts: list[str]) -> bool:
@@ -149,13 +124,13 @@ def authorize(
         return Decision(False, "target has no resolvable host")
 
     if is_ip(host):
-        if _target_in_cidrs(host, scope.allowed_cidrs):
+        if ip_in_cidrs(host, scope.allowed_cidrs):
             return Decision(True, "ip in allowed cidr")
         return Decision(False, "ip not in any allowed cidr")
 
     # Anything non-IP is treated as a hostname and checked against the domain allowlist only.
     # We deliberately do not DNS-resolve here: resolution could point outside scope and is not
     # authorization-relevant. Tools that need an IP resolve inside the sandbox and re-check.
-    if _domain_in_scope(host, scope.allowed_domains):
+    if host_in_domains(host, scope.allowed_domains):
         return Decision(True, "host in allowed domain")
     return Decision(False, "host not in any allowed domain")

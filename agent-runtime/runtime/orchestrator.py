@@ -4,6 +4,12 @@ run is replayable.
 
 `execute_tool_step` runs exactly one tool and is shared by two callers: `run_scan` (the deterministic
 single-tool path) and the LLM agent loop (many steps). Neither can bypass the scope guard.
+
+The `db` sink is opaque here on purpose: it is whatever write interface the caller handed the run,
+and this module knows only its method names. In the control plane it is a *tenant-bound view* of the
+process-wide `PersistenceSink` (`PersistenceSink.for_tenant`), so multi-tenant row stamping happens
+without any tenant argument reaching this file. Resist adding one — a run has exactly one tenant for
+its whole lifetime, so it belongs to the sink, not to each call.
 """
 from __future__ import annotations
 
@@ -21,6 +27,58 @@ from .tools.base import ServiceObservation, Tool
 
 def _audit(sink: AuditSink, engagement_id: str, run_id: str, **kwargs) -> None:
     sink.append(AuditEvent(engagement_id=engagement_id, run_id=run_id, **kwargs))
+
+
+def _audit_many(sink: AuditSink, events: list[AuditEvent]) -> None:
+    """Append a batch of audit events in one round trip.
+
+    The append-only guarantee is untouched — the events are still never updated or deleted, they are
+    just written in one transaction instead of borrowing a connection per event. `append_many` is
+    part of the `AuditSink` protocol, so unlike the graph/db sinks below this needs no feature
+    detection — every sink implements it."""
+    if not events:
+        return
+    sink.append_many(events)
+
+
+def _persist_services(graph, db, engagement_id: str, run_id: str, services: list) -> None:
+    """Write the step's topology in one round trip per store, falling back to the row-at-a-time
+    methods when a store does not (yet) expose the bulk form."""
+    if not services:
+        return
+    if hasattr(graph, "upsert_services"):
+        graph.upsert_services(engagement_id, services, run_id=run_id)
+    else:
+        for svc in services:
+            graph.upsert_service(engagement_id, svc.address, svc.port, svc.proto, svc.service,
+                                 svc.product, run_id)
+    if db is None:
+        return
+    if hasattr(db, "upsert_services"):
+        db.upsert_services(engagement_id,
+                           [(s.address, s.port, s.proto, s.service, s.product) for s in services])
+    else:
+        for svc in services:
+            db.upsert_service(engagement_id, svc.address, svc.port, svc.proto, svc.service, svc.product)
+
+
+def _persist_findings(graph, db, findings: list) -> None:
+    """Write the step's findings in one round trip per store. Callers must have run `enrich_finding`
+    over the list first — the persisted row carries the CVSS score and ATT&CK technique."""
+    if not findings:
+        return
+    if hasattr(graph, "record_findings"):
+        graph.record_findings(findings)
+    else:
+        for finding in findings:
+            graph.record_finding(finding)
+    if db is None:
+        return
+    if hasattr(db, "record_findings"):
+        db.record_findings(findings)
+    else:
+        for finding in findings:
+            db.record_finding(finding)
 
 
 @dataclass
@@ -102,25 +160,34 @@ def execute_tool_step(
             source_dir = target if surface == "artifact" else None
             egress = None if surface in ("artifact", "knowledge") else EgressPolicy.from_scope(engagement.scope)
             result = sandbox.run(tool.image, command, source_dir=source_dir, egress=egress)
+            detail = f"exit={result.exit_code}"
+            if getattr(result, "stdout_truncated", False):
+                # The parse below only saw the first EYE_TOOL_MAX_OUTPUT_BYTES bytes; say so in the
+                # audit log, so a partial result is never mistaken for a complete one on replay.
+                detail += f" (stdout truncated at {len(result.stdout)} bytes)"
             _audit(audit, engagement.id, run.id, type=EventType.tool_finished, tool=tool.name,
-                   target=target, output_sha256=hash_output(result.stdout), detail=f"exit={result.exit_code}")
+                   target=target, output_sha256=hash_output(result.stdout), detail=detail)
             out = tool.parse(result.stdout, engagement_id=engagement.id, run_id=run.id, target=target)
     except Exception as exc:
         return StepResult(allowed=True, error=str(exc))
 
     # 3. Persist topology + findings to the graph and (if configured) the durable store.
-    for svc in out.services:
-        graph.upsert_service(engagement.id, svc.address, svc.port, svc.proto, svc.service,
-                             svc.product, run.id)
-        if db is not None:
-            db.upsert_service(engagement.id, svc.address, svc.port, svc.proto, svc.service, svc.product)
+    #    Written as batches: one `nmap -p-` can yield a service *and* a finding per open port, and a
+    #    row-at-a-time write path turned that into thousands of Neo4j sessions and Postgres
+    #    connection checkouts inside a single step, serialized on the run thread. The bulk methods
+    #    keep the identical MERGE/upsert keys, so nothing duplicates and nothing is written that the
+    #    singular path would not have written; they are feature-detected because the graph/db objects
+    #    here are also fakes in tests and older sinks in the field.
     for finding in out.findings:
         enrich_finding(finding)  # attach CVSS score + ATT&CK technique before persisting
-        graph.record_finding(finding)
-        if db is not None:
-            db.record_finding(finding)
-        _audit(audit, engagement.id, run.id, type=EventType.finding_recorded, tool=finding.source_tool,
-               target=finding.target, detail=f"{finding.severity.value}: {finding.title}")
+    _persist_services(graph, db, engagement.id, run.id, out.services)
+    _persist_findings(graph, db, out.findings)
+    _audit_many(audit, [
+        AuditEvent(engagement_id=engagement.id, run_id=run.id, type=EventType.finding_recorded,
+                   tool=finding.source_tool, target=finding.target,
+                   detail=f"{finding.severity.value}: {finding.title}")
+        for finding in out.findings
+    ])
 
     # 4. Cross-run memory (optional): record what this observation changed vs the persisted map. Runs
     #    after the authoritative graph/db writes and never affects them — a memory failure is swallowed

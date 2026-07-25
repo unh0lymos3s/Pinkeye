@@ -10,7 +10,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional, Protocol
+from typing import Optional, Protocol, Sequence
 
 from pydantic import BaseModel, Field
 
@@ -44,6 +44,8 @@ def hash_output(raw: bytes | str) -> str:
 class AuditSink(Protocol):
     def append(self, event: AuditEvent) -> None: ...
 
+    def append_many(self, events: Sequence[AuditEvent]) -> None: ...
+
 
 class MemoryAuditSink:
     """Non-persistent sink for tests and single-process runs."""
@@ -54,6 +56,11 @@ class MemoryAuditSink:
     def append(self, event: AuditEvent) -> None:
         self.events.append(event)
 
+    def append_many(self, events: Sequence[AuditEvent]) -> None:
+        # `events or ()` so this sink is substitutable for PostgresAuditSink on an empty/None batch
+        # too — the two are interchangeable through AuditSink, so they must agree on the edge cases.
+        self.events.extend(events or ())
+
 
 class PostgresAuditSink:
     """Persists events to the append-only audit_events table (created by migration 0003).
@@ -63,27 +70,40 @@ class PostgresAuditSink:
     forbids). The table's DDL lives in a migration, not here.
     """
 
+    _INSERT = """
+        INSERT INTO audit_events
+            (engagement_id, run_id, type, detail, tool, target, allowed, output_sha256, at, payload)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
     def __init__(self, db) -> None:
         self._db = db  # app.db.database.Database
 
+    @staticmethod
+    def _params(event: AuditEvent) -> tuple:
+        return (
+            event.engagement_id,
+            event.run_id,
+            event.type.value,
+            event.detail,
+            event.tool,
+            event.target,
+            event.allowed,
+            event.output_sha256,
+            event.at,
+            json.dumps(event.model_dump(mode="json")),
+        )
+
     def append(self, event: AuditEvent) -> None:
         with self._db.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO audit_events
-                    (engagement_id, run_id, type, detail, tool, target, allowed, output_sha256, at, payload)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    event.engagement_id,
-                    event.run_id,
-                    event.type.value,
-                    event.detail,
-                    event.tool,
-                    event.target,
-                    event.allowed,
-                    event.output_sha256,
-                    event.at,
-                    json.dumps(event.model_dump(mode="json")),
-                ),
-            )
+            conn.execute(self._INSERT, self._params(event))
+
+    def append_many(self, events: Sequence[AuditEvent]) -> None:
+        """Write a whole step's events in one borrowed connection / one transaction. The
+        append-only guarantee is unaffected: rows are still never updated or deleted."""
+        rows = [self._params(e) for e in events or ()]
+        if not rows:
+            return
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(self._INSERT, rows)

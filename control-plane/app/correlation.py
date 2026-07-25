@@ -8,12 +8,26 @@ A planning agent can layer richer reasoning on top later, but this gives a usefu
 """
 from __future__ import annotations
 
-import uuid
+import hashlib
 from urllib.parse import urlparse
 
 from .models import AttackChain, Finding, Severity, is_ip
 
 _SEV_RANK = {Severity.info: 0, Severity.low: 1, Severity.medium: 2, Severity.high: 3, Severity.critical: 4}
+
+
+def _chain_id(engagement_id: str, kind: str, key: str) -> str:
+    """Content-derived, stable chain id.
+
+    Chain ids used to be `uuid4()`, minted afresh on every call — and `GraphClient.write_attack_chain`
+    MERGEs on the id, so the MERGE always *created*: every render of the chains view permanently added
+    a duplicate AttackChain node plus a STEP edge per member finding, and the map drew N copies of the
+    same chain. Deriving the id from what identifies the chain (engagement + kind + key) makes the
+    correlation output stable across calls and the graph MERGE genuinely idempotent. The chain's
+    *contents* deliberately do not feed the hash: re-correlating a host whose findings have grown
+    should update that host's chain in place, not create a second one.
+    """
+    return hashlib.sha256(f"{engagement_id}|{kind}|{key}".encode()).hexdigest()[:32]
 
 
 def _host_of(target: str) -> str | None:
@@ -47,7 +61,7 @@ def correlate(findings: list[Finding]) -> list[AttackChain]:
         ordered = sorted(group, key=lambda f: _SEV_RANK[f.severity], reverse=True)
         chains.append(
             AttackChain(
-                id=str(uuid.uuid4()), engagement_id=engagement_id,
+                id=_chain_id(engagement_id, "host", host), engagement_id=engagement_id,
                 title=f"Attack path on {host}", risk=_max_sev(ordered),
                 steps=[f.dedup_key() for f in ordered],
                 rationale=f"{len(ordered)} findings on {host}, escalating by severity.",
@@ -67,7 +81,11 @@ def correlate(findings: list[Finding]) -> list[AttackChain]:
         group = [s, *matches]
         chains.append(
             AttackChain(
-                id=str(uuid.uuid4()), engagement_id=engagement_id,
+                # Keyed on the source finding too, not just the CWE: several SAST findings can share
+                # one CWE, and keying on the CWE alone would give those distinct chains the same id —
+                # collapsing them onto a single node whose STEP edges are the union of all of them.
+                id=_chain_id(engagement_id, "cwe", f"{s.cwe}|{s.dedup_key()}"),
+                engagement_id=engagement_id,
                 title=f"Code-to-runtime: {s.cwe}", risk=_max_sev(group),
                 steps=[f.dedup_key() for f in group],
                 rationale=f"{s.cwe} found in source ({s.target}) and reachable at runtime.",
