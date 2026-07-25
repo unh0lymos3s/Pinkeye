@@ -1,4 +1,77 @@
 # Single-host stack for Phase 1: graph DB, run metadata DB, control-plane API, and the web UI.
+#
+# PRODUCTION PATH: `EYE_ENV` (below) defaults to "development", which is what keeps a bare
+# `docker compose up` working with zero config. Set EYE_ENV to anything else and both `api` and
+# `worker` will refuse to *start* unless EYE_SCOPE_SIGNING_KEY and EYE_API_KEYS are also set to real
+# values (control-plane/app/config.py: `assert_secure_scope_key` / `assert_secure_authentication`).
+# The two checks fail differently, and that difference matters for how a broken deploy looks:
+#   - EYE_SCOPE_SIGNING_KEY is checked at *module import* time (bottom of config.py), before uvicorn
+#     binds a port and before the worker's poll loop starts. Leave it on the shipped dev key with
+#     EYE_ENV set to anything else and you get an immediate crash loop on BOTH services -- not a
+#     clean startup error, not a degraded health check, a crash before logging even configures.
+#   - EYE_API_KEYS is checked from the API's `startup` event handler (main.py), once the
+#     Authenticator exists. Only `api` builds an Authenticator -- `worker` never does -- so this
+#     check, and this var, only matters for `api`.
+# See deploy/.env.example for a copy-pasteable template with every var below and which are required
+# outside development.
+
+# Shared by `api` and `worker`: both import control-plane/app/config.py (see the file-header comment
+# on the import-time signing-key check), both call get_provider()/DockerSandbox(), and both need the
+# same view of the databases and the pooled Snyk MCP backend. Keeping this as one block, merged into
+# each service with `<<:`, replaces the old copy-pasted-with-a-comment convention ("Keep in sync with
+# worker") with something that can't drift: there is only one place left to edit.
+#
+# A few dozen more EYE_* knobs exist beyond what's below, all with workable defaults: agent budgets
+# (agent-runtime/runtime/agent.py), LLM retries/token caps (runtime/llm/*), SSE tuning + run
+# retry-after (control-plane/app/main.py), retention TTLs (control-plane/app/events.py, memory.py),
+# the MCP pool's idle TTL (runtime/mcp/pool.py), one-shot backfill flags (control-plane/app/graph.py).
+# They're deliberately left out of this file rather than pasted wholesale — grep `EYE_[A-Z0-9_]+`
+# under control-plane/app and agent-runtime/runtime for the full set, and add one here only when you
+# actually need to override it.
+x-control-plane-env: &control-plane-env
+  # "development" is what makes a bare `docker compose up` work with none of the vars below set; see
+  # the file-header comment for what changes the moment this isn't "development".
+  EYE_ENV: ${EYE_ENV:-development}
+  EYE_NEO4J_URI: bolt://neo4j:7687
+  EYE_NEO4J_PASSWORD: eye-dev-password
+  EYE_POSTGRES_DSN: postgresql://eye:eye@postgres:5432/eye
+  # Override in any real deployment; the scope guard's signatures depend on it. Checked at import —
+  # see the file-header comment.
+  EYE_SCOPE_SIGNING_KEY: ${EYE_SCOPE_SIGNING_KEY:-dev-insecure-signing-key}
+  # Postgres pool sizing, per container. See the connection-budget warning on `worker` below before
+  # raising EYE_PG_POOL_MAX or scaling replicas.
+  EYE_PG_POOL_MIN: ${EYE_PG_POOL_MIN:-2}
+  EYE_PG_POOL_MAX: ${EYE_PG_POOL_MAX:-32}
+  # Sandbox hardening for real targets (unset/empty reproduces today's behavior: the daemon's default
+  # runtime, no egress enforcement beyond what's computed and logged). EYE_SANDBOX_RUNTIME=runsc runs
+  # scan/agent containers under gVisor; EYE_EGRESS_ENFORCER names an external command (invoked with
+  # the container id) that installs the per-job egress allow-list as real nftables rules — see
+  # agent-runtime/runtime/sandbox.py.
+  EYE_SANDBOX_RUNTIME: ${EYE_SANDBOX_RUNTIME:-}
+  EYE_EGRESS_ENFORCER: ${EYE_EGRESS_ENFORCER:-}
+  # Ollama Cloud (direct): the containers call Ollama's cloud API over the internet, so no host
+  # Ollama and no firewall/binding issues. Needs an API key from https://ollama.com/settings/keys
+  # exported as OLLAMA_API_KEY before `up`.
+  EYE_LLM_PROVIDER: openai
+  EYE_LLM_MODEL: minimax-m3:cloud
+  EYE_LLM_BASE_URL: https://ollama.com/v1
+  EYE_LLM_API_KEY: ${OLLAMA_API_KEY:-}
+  EYE_LLM_TIMEOUT: "60"
+  # Optional: a stronger backstop if the primary refuses an authorized step (needs its key).
+  # EYE_LLM_FALLBACK_MODELS: "claude:claude-fable-5"
+  # SAST slot via the *pooled* Snyk MCP server: the `semgrep` tool routes to a warm, locked-down
+  # `eye-mcp-snyk` sibling container (run by the connection pool), not an in-process subprocess.
+  # SNYK_TOKEN (from deploy/.env) is forwarded by name into that sibling; the source root is
+  # bind-mounted read-only at /samples inside it (host path via EYE_SRC_ROOT). Build the image with
+  # `docker compose build mcp-snyk` before first use.
+  SNYK_TOKEN: ${SNYK_TOKEN:-}
+  EYE_SRC_ROOT: ${EYE_SRC_ROOT:-/samples}
+  # Root for codebases uploaded via the SAST tab. It is bind-mounted at the SAME absolute path on
+  # the host and in this container (below), and read-only into the Snyk sibling (mounts), so an
+  # extracted path means the same thing to the api, the disposable sandbox, and the MCP server.
+  EYE_UPLOAD_ROOT: /eye-uploads
+  EYE_MCP_SERVERS: '{"semgrep":{"pooled":true,"image":"eye-mcp-snyk:latest","tool":"snyk_code_scan","target_arg":"path","env":{"SNYK_TOKEN":"${SNYK_TOKEN:-}"},"mounts":["${EYE_SRC_ROOT:-/samples}:/samples:ro","/eye-uploads:/eye-uploads:ro"]}}'
+
 services:
   neo4j:
     image: neo4j:5-community
@@ -26,33 +99,30 @@ services:
       context: ..
       dockerfile: deploy/api.Dockerfile
     environment:
-      EYE_NEO4J_URI: bolt://neo4j:7687
-      EYE_NEO4J_PASSWORD: eye-dev-password
-      EYE_POSTGRES_DSN: postgresql://eye:eye@postgres:5432/eye
-      # Override in any real deployment; the scope guard's signatures depend on it.
-      EYE_SCOPE_SIGNING_KEY: dev-insecure-signing-key
-      # Ollama Cloud (direct): the containers call Ollama's cloud API over the internet, so no host
-      # Ollama and no firewall/binding issues. Needs an API key from https://ollama.com/settings/keys
-      # exported as OLLAMA_API_KEY before `up`. Keep in sync with `worker`.
-      EYE_LLM_PROVIDER: openai
-      EYE_LLM_MODEL: minimax-m3:cloud
-      EYE_LLM_BASE_URL: https://ollama.com/v1
-      EYE_LLM_API_KEY: ${OLLAMA_API_KEY:-}
-      EYE_LLM_TIMEOUT: "60"
-      # Optional: a stronger backstop if the primary refuses an authorized step (needs its key).
-      # EYE_LLM_FALLBACK_MODELS: "claude:claude-fable-5"
-      # SAST slot via the *pooled* Snyk MCP server: the `semgrep` tool routes to a warm, locked-down
-      # `eye-mcp-snyk` sibling container (run by the connection pool), not an in-process subprocess.
-      # SNYK_TOKEN (from deploy/.env) is forwarded by name into that sibling; the source root is
-      # bind-mounted read-only at /samples inside it (host path via EYE_SRC_ROOT). Build the image with
-      # `docker compose build mcp-snyk` before first use.
-      SNYK_TOKEN: ${SNYK_TOKEN:-}
-      EYE_SRC_ROOT: ${EYE_SRC_ROOT:-/samples}
-      # Root for codebases uploaded via the SAST tab. It is bind-mounted at the SAME absolute path on
-      # the host and in this container (below), and read-only into the Snyk sibling (mounts), so an
-      # extracted path means the same thing to the api, the disposable sandbox, and the MCP server.
-      EYE_UPLOAD_ROOT: /eye-uploads
-      EYE_MCP_SERVERS: '{"semgrep":{"pooled":true,"image":"eye-mcp-snyk:latest","tool":"snyk_code_scan","target_arg":"path","env":{"SNYK_TOKEN":"${SNYK_TOKEN:-}"},"mounts":["${EYE_SRC_ROOT:-/samples}:/samples:ro","/eye-uploads:/eye-uploads:ro"]}}'
+      <<: *control-plane-env
+      # api-only: `worker` never builds a FastAPI app or an Authenticator, so it isn't subject to
+      # CORS, the open-dev-mode check, or the run concurrency pool below -- these three don't need to
+      # (and shouldn't) be duplicated onto `worker`.
+      #
+      # S6/S3: with no EYE_API_KEYS every request authenticates as a default-tenant admin (fine for
+      # this dev stack; refused outright once EYE_ENV != development, see the file-header comment).
+      EYE_API_KEYS: ${EYE_API_KEYS:-}
+      # CORS is an allowlist, not "*" -- the browser origin actually hitting this API must be listed
+      # here. That origin is derived from NEXT_PUBLIC_API_BASE below: they're set independently but
+      # describe the same address pair, so changing one without the other breaks the UI's requests.
+      #   - loopback dev (default on both sides): NEXT_PUBLIC_API_BASE=http://localhost:9000,
+      #     browser origin http://localhost:3000 -> matches the default below.
+      #   - LAN/Tailscale (per the `web` build-arg comment, NEXT_PUBLIC_API_BASE must be the host's
+      #     IP, not localhost): the browser then loads the UI from http://<host-ip>:3000, which is a
+      #     DIFFERENT origin from the default below and gets rejected by CORS unless you also set
+      #     EYE_CORS_ORIGINS=http://<host-ip>:3000 (comma-separated if the UI is reachable at more
+      #     than one origin, e.g. both localhost and the Tailscale IP).
+      EYE_CORS_ORIGINS: ${EYE_CORS_ORIGINS:-http://localhost:3000}
+      # B1: size of the in-process pool that runs agent/scan requests submitted through this API.
+      # This is NOT how you scale scan throughput -- that's `--scale worker=N` below, which drains the
+      # durable job queue out-of-process. This just bounds how many runs one `api` container drives
+      # concurrently before returning 503 + Retry-After.
+      EYE_MAX_CONCURRENT_RUNS: ${EYE_MAX_CONCURRENT_RUNS:-8}
     ports:
       - "9000:9000"
     depends_on:
@@ -66,29 +136,19 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /eye-uploads:/eye-uploads
 
-  # Scan worker: drains the durable job queue. Scale with `docker compose up --scale worker=N`.
+  # Scan worker: drains the durable job queue. Scale with `docker compose up --scale worker=N` for
+  # throughput -- but each replica (and `api`) opens its OWN Postgres pool sized by EYE_PG_POOL_MAX
+  # (default 32 below), while stock `postgres:16` allows only 100 connections total. Do the arithmetic
+  # before scaling up: at the default, 3 worker replicas + 1 api already reserve up to 4*32=128 possible
+  # connections against a 100-connection server (the pool won't necessarily *open* all of them, but it
+  # is allowed to). Either lower EYE_PG_POOL_MAX or raise Postgres's `max_connections` before scaling.
   worker:
     build:
       context: ..
       dockerfile: deploy/api.Dockerfile
     command: ["python", "-m", "app.worker"]
     environment:
-      EYE_NEO4J_URI: bolt://neo4j:7687
-      EYE_NEO4J_PASSWORD: eye-dev-password
-      EYE_POSTGRES_DSN: postgresql://eye:eye@postgres:5432/eye
-      EYE_SCOPE_SIGNING_KEY: dev-insecure-signing-key
-      # Mirrors the api service — the worker also calls get_provider(). Ollama Cloud (direct).
-      EYE_LLM_PROVIDER: openai
-      EYE_LLM_MODEL: minimax-m3:cloud
-      EYE_LLM_BASE_URL: https://ollama.com/v1
-      EYE_LLM_API_KEY: ${OLLAMA_API_KEY:-}
-      EYE_LLM_TIMEOUT: "60"
-      # EYE_LLM_FALLBACK_MODELS: "claude:claude-fable-5"
-      # Mirror the api service so job-queue runs also use the pooled Snyk MCP SAST backend.
-      SNYK_TOKEN: ${SNYK_TOKEN:-}
-      EYE_SRC_ROOT: ${EYE_SRC_ROOT:-/samples}
-      EYE_UPLOAD_ROOT: /eye-uploads
-      EYE_MCP_SERVERS: '{"semgrep":{"pooled":true,"image":"eye-mcp-snyk:latest","tool":"snyk_code_scan","target_arg":"path","env":{"SNYK_TOKEN":"${SNYK_TOKEN:-}"},"mounts":["${EYE_SRC_ROOT:-/samples}:/samples:ro","/eye-uploads:/eye-uploads:ro"]}}'
+      <<: *control-plane-env
     depends_on:
       - neo4j
       - postgres
@@ -112,6 +172,8 @@ services:
       args:
         # Baked into the client bundle at build time. Point at a reachable API address —
         # for LAN/Tailscale access this must be the host's IP, not localhost.
+        # NOTE: if you change this, the browser's origin changes too -- update EYE_CORS_ORIGINS on
+        # `api` to match, or the UI's requests get rejected by CORS (see the comment there).
         NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:9000}
     ports:
       - "3000:3000"

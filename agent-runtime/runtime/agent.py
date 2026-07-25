@@ -7,12 +7,12 @@ work around. Token and tool-call budgets bound cost and stop runaway loops.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from app.audit import AuditSink
 from app.models import Engagement, Intensity, Run, RunStatus
 
+from .envutil import env_int
 from .llm.base import LLMProvider, Message, ToolSpec
 from .llm.refusal import is_refusal
 from .orchestrator import execute_tool_step
@@ -85,12 +85,21 @@ ASK_USER_SPEC = ToolSpec(
 # never taking an intrusive action, since that still needs approval). Read from the env at call time.
 DEFAULT_ASK_TIMEOUT_SECONDS = 600
 
+# How many past exchanges the history keeps verbatim before older ones are rolled up into a single
+# summary line (B7). One "block" is an assistant turn plus the tool results answering it; the seed
+# user turn and every system message are always preserved. 0 disables compaction entirely.
+DEFAULT_HISTORY_BLOCKS = 12
+_HISTORY_SUMMARY_CHARS = 4000
+_HISTORY_ENTRY_CHARS = 160
+
 
 @dataclass
 class Budget:
     # Hard backstop on a run, larger than a single-tool scan needs but never unlimited — a runaway
     # loop still terminates. Defaults are env-tunable so an operator can size them to an engagement.
     max_tool_calls: int = 40
+    # Counted against input + output tokens: resending a growing history is the dominant cost of a
+    # long run, so a budget that only saw output tokens could not see (let alone bound) it.
     max_output_tokens: int = 200000
 
     @classmethod
@@ -98,28 +107,24 @@ class Budget:
         """Build a Budget from EYE_AGENT_MAX_TOOL_CALLS / EYE_AGENT_MAX_OUTPUT_TOKENS, falling back
         to the defaults (and ignoring unparseable values) so a bad env var can't disable the cap."""
         return cls(
-            max_tool_calls=_env_int("EYE_AGENT_MAX_TOOL_CALLS", cls.max_tool_calls),
-            max_output_tokens=_env_int("EYE_AGENT_MAX_OUTPUT_TOKENS", cls.max_output_tokens),
+            max_tool_calls=env_int("EYE_AGENT_MAX_TOOL_CALLS", cls.max_tool_calls, minimum=1),
+            max_output_tokens=env_int("EYE_AGENT_MAX_OUTPUT_TOKENS", cls.max_output_tokens, minimum=1),
         )
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 @dataclass
 class AgentResult:
     tool_calls_used: int = 0
     output_tokens: int = 0
+    # Measured too, and charged to the same budget: `ProviderResponse.input_tokens` already carried
+    # this, it was simply never read, so history growth was invisible to the cap meant to bound it.
+    input_tokens: int = 0
     findings: int = 0
     stop_reason: str = ""
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
 
 
 def _summarize(step) -> str:
@@ -239,7 +244,11 @@ def run_agent(
         provider.on_refusal = lambda data: emit("refusal", **data)
 
     stop_status = RunStatus.completed
+    keep_blocks = env_int("EYE_AGENT_HISTORY_BLOCKS", DEFAULT_HISTORY_BLOCKS, minimum=0)
     while True:
+        # Roll up old exchanges before resending the conversation, so input tokens stop growing
+        # quadratically over a long run. Never splits an assistant tool_use from its tool_result.
+        messages = _compact_history(messages, keep_blocks)
         try:
             resp = provider.complete(messages, specs)
         except Exception as exc:
@@ -250,6 +259,7 @@ def run_agent(
             stop_status = RunStatus.failed
             break
         result.output_tokens += resp.output_tokens
+        result.input_tokens += resp.input_tokens
         if resp.text.strip():
             emit("thinking", text=resp.text)
 
@@ -265,6 +275,13 @@ def run_agent(
 
         messages.append(Message(role="assistant", content=resp.text, tool_calls=resp.tool_calls))
         for tc in resp.tool_calls:
+            if result.tool_calls_used >= budget.max_tool_calls:
+                # The budget is checked *inside* the batch: a model that returns ten parallel calls
+                # on the last permitted step must not get to execute all ten. Each skipped tool_use
+                # still gets a matching tool_result so the history never goes structurally invalid.
+                messages.append(Message(role="tool", tool_call_id=tc.id,
+                                        content="skipped: the run's tool-call budget was reached"))
+                continue
             if tc.name == "ask_user":
                 # Interactive step: emit the question, block for the operator's reply, feed it back.
                 summary = _ask_user(engagement, run, tc, emit, inbox)
@@ -283,12 +300,73 @@ def run_agent(
         if result.tool_calls_used >= budget.max_tool_calls:
             result.stop_reason = "tool-call budget reached"
             break
-        if result.output_tokens >= budget.max_output_tokens:
+        if result.total_tokens >= budget.max_output_tokens:
             result.stop_reason = "token budget reached"
             break
 
     _set_status(stop_status)
     return result
+
+
+def _history_blocks(body: list[Message]) -> list[list[Message]]:
+    """Group the non-system history into atomic blocks.
+
+    A `tool` message answers the assistant turn immediately before it, and the provider adapters
+    render it as a `tool_result` referencing that turn's `tool_use` id (llm/claude.py, and the
+    OpenAI adapter's `tool_call_id`). Dropping one without the other produces a conversation the
+    provider API rejects, so the pair is inseparable: every `tool` message is attached to the block
+    opened by the preceding non-tool message, and compaction only ever keeps or drops whole blocks.
+    A leading `tool` message with no block to attach to is already an orphan and is dropped."""
+    blocks: list[list[Message]] = []
+    current: list[Message] = []
+    for message in body:
+        if message.role == "tool":
+            if current:
+                current.append(message)
+            continue  # orphan (cannot happen from this loop) — never re-emitted
+        if current:
+            blocks.append(current)
+        current = [message]
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _rollup(dropped: list[list[Message]]) -> str:
+    """One system line standing in for the exchanges that were dropped, so the model keeps a trace
+    of what it already did instead of silently losing it."""
+    parts: list[str] = []
+    for block in dropped:
+        for message in block:
+            text = (message.content or "").strip().replace("\n", " ")
+            if text:
+                parts.append(text[:_HISTORY_ENTRY_CHARS])
+    return ("Earlier steps (summarized, oldest first): " + "; ".join(parts))[:_HISTORY_SUMMARY_CHARS]
+
+
+def _compact_history(messages: list[Message], keep_blocks: int) -> list[Message]:
+    """Bound the conversation resent on every iteration (B7).
+
+    Preserved unconditionally: every system message (the mission, the known-map seed) and the first
+    body turn — the seed user message, which must stay first because Anthropic requires the message
+    list to open with a user turn. Everything between it and the last `keep_blocks` exchanges is
+    replaced by a single summary system message. Returns the input list unchanged when there is
+    nothing to drop, so short runs behave exactly as before."""
+    if keep_blocks <= 0:
+        return messages
+    system = [m for m in messages if m.role == "system"]
+    body = [m for m in messages if m.role != "system"]
+    blocks = _history_blocks(body)
+    if len(blocks) <= keep_blocks + 1:  # +1 for the seed turn, which is never dropped
+        return messages
+    seed, rest = blocks[0], blocks[1:]
+    dropped, kept = rest[:-keep_blocks], rest[-keep_blocks:]
+    if not dropped:
+        return messages
+    out: list[Message] = [*system, Message(role="system", content=_rollup(dropped)), *seed]
+    for block in kept:
+        out.extend(block)
+    return out
 
 
 def _known_map_message(memory, engagement_id: str) -> str:
@@ -336,7 +414,7 @@ def _ask_user(engagement, run, tc, emit, inbox) -> str:
     action = args.get("action")
     emit("ask", question=question, kind=kind, action=action)
 
-    timeout = _env_int("EYE_AGENT_ASK_TIMEOUT", DEFAULT_ASK_TIMEOUT_SECONDS)
+    timeout = env_int("EYE_AGENT_ASK_TIMEOUT", DEFAULT_ASK_TIMEOUT_SECONDS, minimum=1)
     reply = inbox.wait(run.id, timeout) if inbox is not None else None
     if reply is None or not str(reply).strip():
         note = (
@@ -368,18 +446,28 @@ def _dispatch_specialist(tc, run_specialist, engagement, run, provider, sandbox,
         return f"specialist '{kind}' needs a 'target' argument"
 
     remaining_calls = budget.max_tool_calls - result.tool_calls_used
-    remaining_tokens = budget.max_output_tokens - result.output_tokens
+    remaining_tokens = budget.max_output_tokens - result.total_tokens
     if remaining_calls <= 0 or remaining_tokens <= 0:
         emit("subagent_finished", specialist=kind, stage=stage, error="run budget exhausted")
         return f"cannot dispatch '{kind}': the run budget is exhausted — summarize and stop"
 
     emit("subagent_started", specialist=kind, stage=stage, target=target, focus=focus)
-    summary, calls, tokens, findings = run_specialist(
-        kind, target, focus, engagement=engagement, run=run, provider=provider, sandbox=sandbox,
-        graph=graph, audit=audit, db=db, context=context, events=events, memory=memory, inbox=inbox,
-        pool=specialist_pool or [], remaining_calls=remaining_calls, remaining_tokens=remaining_tokens)
+    # The provider instance is shared with every specialist, and a nested run_agent rebinds
+    # `on_refusal` to its own emitter (which stamps subagent=kind). Without restoring it, this
+    # orchestrator's later refusals would be attributed to the last specialist that ran.
+    previous_on_refusal = getattr(provider, "on_refusal", None)
+    try:
+        summary, calls, out_tokens, in_tokens, findings = run_specialist(
+            kind, target, focus, engagement=engagement, run=run, provider=provider, sandbox=sandbox,
+            graph=graph, audit=audit, db=db, context=context, events=events, memory=memory,
+            inbox=inbox, pool=specialist_pool or [], remaining_calls=remaining_calls,
+            remaining_tokens=remaining_tokens)
+    finally:
+        if hasattr(provider, "on_refusal"):
+            provider.on_refusal = previous_on_refusal
     result.tool_calls_used += calls
-    result.output_tokens += tokens
+    result.output_tokens += out_tokens
+    result.input_tokens += in_tokens
     result.findings += findings
     emit("subagent_finished", specialist=kind, stage=stage, summary=summary, findings=findings,
          tool_calls=calls)
@@ -429,17 +517,21 @@ def _run_one(engagement, run, tc, registry, sandbox, graph, audit, db, result, c
     return summary
 
 
+_DELTA_BUCKETS = ("added", "changed", "removed", "newly_exploitable")
+
+
 def _delta_events(delta) -> list[dict]:
-    """Flatten a MemoryDelta into per-change event payloads. Tolerates either a plain dict (test
-    sinks) or the MemoryDelta dataclass so agent.py stays decoupled from the memory module."""
+    """Flatten a MemoryDelta into per-change event payloads. The shape is normalized once, at the
+    boundary — MemoryDelta already knows how to render itself, and a plain dict (test sinks) is
+    taken as-is — so the buckets below are read one way instead of duck-typed four times."""
+    if isinstance(delta, dict):
+        data = delta
+    elif hasattr(delta, "to_dict"):
+        data = delta.to_dict()
+    else:  # an unknown shape: read the buckets off the object, never crash the event stream
+        data = {name: getattr(delta, name, []) for name in _DELTA_BUCKETS}
     out: list[dict] = []
-    buckets = (
-        ("added", delta.get("added") if isinstance(delta, dict) else getattr(delta, "added", [])),
-        ("changed", delta.get("changed") if isinstance(delta, dict) else getattr(delta, "changed", [])),
-        ("removed", delta.get("removed") if isinstance(delta, dict) else getattr(delta, "removed", [])),
-        ("newly_exploitable",
-         delta.get("newly_exploitable") if isinstance(delta, dict) else getattr(delta, "newly_exploitable", [])),
-    )
+    buckets = ((name, data.get(name)) for name in _DELTA_BUCKETS)
     for change, items in buckets:
         for item in items or []:
             payload = dict(item) if isinstance(item, dict) else {"key": str(item)}

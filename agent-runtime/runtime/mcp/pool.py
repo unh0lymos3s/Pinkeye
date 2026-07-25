@@ -45,7 +45,11 @@ class MCPConnectionPool:
         self._idle_ttl = idle_ttl if idle_ttl is not None else float(os.getenv("EYE_MCP_IDLE_TTL", "300"))
         self._clock = clock or time.monotonic  # injectable so idle eviction is testable
         self._sessions: dict[str, _Entry] = {}
+        # `_lock` guards the maps only — never a connect. `_key_locks` serializes the *slow* path
+        # (container spawn + MCP handshake, up to ~130s) per server, so a cold start of one server
+        # no longer blocks acquisition of every other, already-warm one.
         self._lock = threading.RLock()
+        self._key_locks: dict[str, threading.Lock] = {}
         self._reaper: threading.Thread | None = None
         self._stop = threading.Event()
         self.connect_count = 0  # visible for tests / warm-reuse assertions
@@ -65,18 +69,30 @@ class MCPConnectionPool:
         raise last_exc
 
     def _acquire(self, spec, key: str) -> MCPSession:
+        # Fast path: a live session for this key, under the short map lock only.
         with self._lock:
             entry = self._sessions.get(key)
-            if entry is None or entry.session.closed:
-                if entry is not None:
-                    self._safe_close(entry.session)
-                session = self._factory(spec)  # connect + handshake (may raise MCPError)
+            if entry is not None and not entry.session.closed:
+                entry.last_used = self._clock()
+                return entry.session
+            key_lock = self._key_locks.setdefault(key, threading.Lock())
+
+        with key_lock:  # only callers wanting *this* server wait for its connect
+            with self._lock:
+                # Re-check: another thread may have connected this key while we waited.
+                entry = self._sessions.get(key)
+                if entry is not None and not entry.session.closed:
+                    entry.last_used = self._clock()
+                    return entry.session
+                dead = self._sessions.pop(key, None)
+            if dead is not None:
+                self._safe_close(dead.session)
+            session = self._factory(spec)  # connect + handshake, OUTSIDE the global lock
+            with self._lock:
                 self.connect_count += 1
-                entry = _Entry(session, self._clock())
-                self._sessions[key] = entry
+                self._sessions[key] = _Entry(session, self._clock())
                 self._ensure_reaper()
-            entry.last_used = self._clock()
-            return entry.session
+            return session
 
     def _drop(self, key: str) -> None:
         with self._lock:

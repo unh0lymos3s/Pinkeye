@@ -103,12 +103,19 @@ input, select, textarea, button { accent-color: var(--brand); }
   gap: 8px;
 }
 .nav-bubble-tab {
+  position: relative;
   width: 34px; height: 34px; flex: none;
   display: grid; place-items: center;
   border-radius: 50%;
   background: #ffffff;
   color: var(--brand);
   font-size: 16px;
+}
+/* Small always-visible pulse on the collapsed tab when there's an unread 401/403 notice, so the
+   operator notices even without hovering the nav open. */
+.nav-auth-dot {
+  position: absolute; top: -2px; right: -2px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--brand); box-shadow: 0 0 0 1px #ffffff; animation: beat 1.8s infinite;
 }
 .nav-bubble-panel {
   display: flex;
@@ -134,6 +141,21 @@ input, select, textarea, button { accent-color: var(--brand); }
 }
 .nav-bubble-link:hover { background: rgba(255, 45, 160, 0.1); }
 .nav-bubble-link.active { background: var(--brand); color: #ffffff; }
+
+/* Operator's API key entry, at the top of the nav panel. */
+.nav-key {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 8px 10px; margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.nav-key-row { display: flex; gap: 6px; }
+.nav-key-input { flex: 1; min-width: 0; padding: 6px 8px; font-size: 12px; }
+.nav-auth-notice {
+  margin: 2px 4px 8px; padding: 8px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong); background: rgba(255, 255, 255, 0.18);
+  color: var(--text); font-size: 12px; line-height: 1.4;
+}
+.nav-auth-notice.role { background: rgba(255, 255, 255, 0.08); }
 
 /* ---- Cards ---- */
 .card {
@@ -557,6 +579,14 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
   width: 100%;
   height: auto;
   animation: ascii-wave 30s ease-in-out infinite;
+}
+/* Each row is its own transformed (translateY) element, so the browser promotes it to its own
+   compositing layer and rasterizes/snaps it independently of its siblings. At non-integer scaled
+   row heights (any width that isn't an exact multiple of ASCII_LOGO.length), that independent
+   snapping leaves a hairline gap between rows. Pulling every row up by 1px so it overlaps the one
+   above hides that seam; it's invisible since the overlap is filled with the same solid color. */
+.ascii-row + .ascii-row {
+  margin-top: -1px;
 }
 /* The bounce occupies only the first ~1.8s of the 30s cycle (0-6%); the row then sits flat for the
    remaining ~28s until the cycle repeats. Per-row animation-delay (set inline in page.tsx) staggers

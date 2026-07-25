@@ -24,7 +24,10 @@ from runtime.sandbox import DockerSandbox
 from runtime.toolset import all_tools
 
 
-def _handle(job: dict, db, graph, audit) -> bool:
+def _handle(job: dict, db, graph, audit, tools: dict) -> bool:
+    """Execute one claimed job. `tools` is built once at worker startup (R10): rebuilding it here
+    re-instantiated 14 tool objects and re-parsed EYE_MCP_SERVERS through `wrap_tools_with_mcp` on
+    every single job, which is exactly what `main.py` avoids by building its map once at import."""
     engagements = EngagementRepo(db)
     eng = engagements.get(job["engagement_id"])
     if not eng:
@@ -32,7 +35,6 @@ def _handle(job: dict, db, graph, audit) -> bool:
     p = job["payload"]
     run = Run(id=p["run_id"], engagement_id=eng.id, target=p["target"])
     persistence = PersistenceSink(db)
-    tools = {t.name: t for t in all_tools(db)}
     if p.get("mode") == "agent":
         run_agent(eng, run, get_provider("planner"), ToolRegistry(list(tools.values())),
                   DockerSandbox(), graph, audit, persistence)
@@ -53,6 +55,7 @@ def main(poll_seconds: float = 2.0) -> None:
         audit = PostgresAuditSink(db)
     except Exception:
         audit = MemoryAuditSink()
+    tools = {t.name: t for t in all_tools(db)}
     queue = JobQueue(db)
     print("eye worker started; polling for jobs…")
     while True:
@@ -61,7 +64,7 @@ def main(poll_seconds: float = 2.0) -> None:
             time.sleep(poll_seconds)
             continue
         try:
-            ok = _handle(job, db, graph, audit)
+            ok = _handle(job, db, graph, audit, tools)
         except Exception as exc:
             print(f"job {job['id']} failed: {exc}")
             ok = False

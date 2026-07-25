@@ -3,7 +3,7 @@
 // table for the selected engagement. Actions: validate corroborated findings, download the report.
 import { useEffect, useState } from "react";
 import {
-  fetchChains, fetchMetrics, queryFindings, reportUrl, validateFindings,
+  fetchChains, fetchMetrics, openReport, queryFindings, validateFindings,
   type Chain, type Finding, type Metrics,
 } from "../../lib/api";
 import { useEngagement } from "../../lib/useEngagement";
@@ -45,6 +45,19 @@ export default function Dashboard() {
     }
   }
 
+  // The report used to be a plain <a href> opened in a new tab, but that can't carry the X-API-Key
+  // header a keyed deployment now requires — and putting the key in the URL instead would leak it via
+  // logs/history/Referer. openReport() fetches with the header attached and opens the result as a
+  // blob: URL, keeping the "new tab" experience with no key ever touching the address bar.
+  async function onReport() {
+    if (!selected) return;
+    try {
+      await openReport(selected);
+    } catch (e) {
+      setNote(`report failed: ${String(e)}`);
+    }
+  }
+
   const sev = metrics?.findings_by_severity || {};
   const sevMax = Math.max(1, ...SEV_ORDER.map((k) => sev[k] || 0));
 
@@ -59,9 +72,9 @@ export default function Dashboard() {
           {selected && (
             <>
               <button className="btn" onClick={onValidate}>Validate findings</button>
-              <a className="btn btn-primary" href={reportUrl(selected)} target="_blank" rel="noreferrer">
+              <button className="btn btn-primary" onClick={onReport}>
                 Report ↗
-              </a>
+              </button>
             </>
           )}
         </div>

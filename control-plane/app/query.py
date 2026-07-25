@@ -21,6 +21,7 @@ class FindingFilters(BaseModel):
     target: Optional[str] = None
     q: Optional[str] = None  # free-text match against title/evidence
     limit: int = 200
+    offset: int = 0  # paging cursor; used by FindingRepo.iter_findings to walk past the limit cap
 
 
 def build_findings_query(engagement_id: str, f: FindingFilters, tenant_id: str | None = None) -> tuple[str, list]:
@@ -52,15 +53,22 @@ def build_findings_query(engagement_id: str, f: FindingFilters, tenant_id: str |
         like = f"%{f.q}%"
         params.extend([like, like])
 
-    limit = max(1, min(f.limit, 1000))  # clamp so a query can't pull the whole table
+    limit = max(1, min(f.limit, 1000))  # clamp so a single query can't pull the whole table
+    # dedup_key is the primary key, so it makes the ordering a total order. Without it two rows with
+    # the same (cvss_score, last_seen) can swap places between pages and a paged walk would skip or
+    # repeat them.
     sql = (
         "SELECT dedup_key, id, engagement_id, run_id, title, category, severity, state, "
         "confidence, target, cwe, cve, cvss_score, cvss_vector, attack_technique, "
         "attack_technique_name, evidence, source_tool, first_seen, last_seen, times_seen "
         "FROM findings WHERE " + " AND ".join(clauses) +
-        " ORDER BY cvss_score DESC, last_seen DESC LIMIT %s"
+        " ORDER BY cvss_score DESC, last_seen DESC, dedup_key LIMIT %s"
     )
     params.append(limit)
+    offset = max(0, int(f.offset or 0))
+    if offset:
+        sql += " OFFSET %s"
+        params.append(offset)
     return sql, params
 
 

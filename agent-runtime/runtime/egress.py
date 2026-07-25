@@ -7,14 +7,18 @@ enforcing it (iptables/nftables on the sandbox's dedicated network, applied by t
 """
 from __future__ import annotations
 
-import ipaddress
 from dataclasses import dataclass, field
 
+from app.matching import host_in_domains, ip_in_cidrs, normalize_domain
 from app.models import Scope
 
 
 @dataclass
 class EgressPolicy:
+    """The destinations a sandbox may reach, matched with the *same* primitives the scope guard uses
+    (`app.matching`). That sharing is the point: if this layer's notion of "in scope" drifted from the
+    guard's, the backstop would silently stop backing up the boundary it exists to reinforce."""
+
     cidrs: list[str] = field(default_factory=list)
     domains: list[str] = field(default_factory=list)
 
@@ -22,22 +26,11 @@ class EgressPolicy:
     def from_scope(cls, scope: Scope) -> "EgressPolicy":
         return cls(
             cidrs=list(scope.allowed_cidrs),
-            domains=[d.lower().lstrip("*.") for d in scope.allowed_domains],
+            domains=[normalize_domain(d) for d in scope.allowed_domains],
         )
 
     def allows_ip(self, ip: str) -> bool:
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
-            return False
-        for cidr in self.cidrs:
-            try:
-                if addr in ipaddress.ip_network(cidr, strict=False):
-                    return True
-            except ValueError:
-                continue
-        return False
+        return ip_in_cidrs(ip, self.cidrs)
 
     def allows_host(self, host: str) -> bool:
-        host = host.lower().rstrip(".")
-        return any(host == d or host.endswith("." + d) for d in self.domains)
+        return host_in_domains(host, self.domains)

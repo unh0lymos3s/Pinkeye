@@ -11,6 +11,7 @@ ever *calls* a tool, it never lets a server call back into the model.
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
 import select
@@ -20,6 +21,9 @@ from typing import Any
 
 PROTOCOL_VERSION = "2025-06-18"
 _CLIENT_INFO = {"name": "pinkeye", "version": "0.1.0"}
+# How many stderr lines to keep for diagnostics. The pipe must be drained continuously (see
+# `_start_stderr_pump`); this bounds what we hold on to while doing it.
+_STDERR_TAIL_LINES = 200
 
 
 class MCPError(RuntimeError):
@@ -50,6 +54,10 @@ class MCPClient:
         self._proc: subprocess.Popen | None = None
         self._next_id = 0
         self._lock = threading.Lock()
+        # Bounded tail of the server's stderr, filled by a reader thread. `deque.append` is atomic,
+        # so no lock is needed between the pump and the request thread that reads it.
+        self._stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
+        self._stderr_thread: threading.Thread | None = None
 
     # -- lifecycle -------------------------------------------------------------------------------
     def __enter__(self) -> "MCPClient":
@@ -72,7 +80,35 @@ class MCPClient:
             )
         except (OSError, ValueError) as exc:
             raise MCPError(f"failed to launch MCP server '{self._command}': {exc}") from exc
+        self._start_stderr_pump()
         self._handshake()
+
+    def _start_stderr_pump(self) -> None:
+        """Drain the server's stderr continuously into a bounded tail.
+
+        Without this, nothing reads the pipe during normal operation: a server that logs verbosely
+        fills the 64 KiB pipe buffer, blocks on write, stops answering on stdout, and the client
+        hangs until its select() ceiling — surfacing to the operator as a misleading "MCP server
+        timed out". Draining into a deque (rather than DEVNULL) keeps the last lines available, so
+        the timeout/closed errors can say what the server was actually complaining about.
+        """
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        stream = proc.stderr
+
+        def pump() -> None:
+            try:
+                for line in stream:
+                    self._stderr_tail.append(line.rstrip("\n"))
+            except Exception:
+                pass  # stream closed under us during close(): nothing left to drain
+
+        self._stderr_thread = threading.Thread(target=pump, name="mcp-stderr", daemon=True)
+        self._stderr_thread.start()
+
+    def _stderr_text(self) -> str:
+        return "\n".join(self._stderr_tail)
 
     def close(self) -> None:
         proc, self._proc = self._proc, None
@@ -164,16 +200,13 @@ class MCPClient:
         # select() gives us a hard wall-clock ceiling so a hung/silent server can't block a run.
         ready, _, _ = select.select([proc.stdout], [], [], self._timeout)
         if not ready:
-            raise MCPError(f"MCP server timed out after {self._timeout}s")
+            raise MCPError(f"MCP server timed out after {self._timeout}s."
+                           f" stderr tail: {self._stderr_text()[-500:]}")
         line = proc.stdout.readline()
         if line == "":
-            stderr = ""
-            try:
-                if proc.stderr is not None:
-                    stderr = proc.stderr.read() or ""
-            except Exception:
-                pass
-            raise MCPError(f"MCP server closed the connection. stderr: {stderr[:500]}")
+            # stderr is already drained by the pump thread; read the tail it collected rather than
+            # racing it for the pipe.
+            raise MCPError(f"MCP server closed the connection. stderr: {self._stderr_text()[-500:]}")
         return line
 
 

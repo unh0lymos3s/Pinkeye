@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 
+from ..envutil import env_int
 from .base import LLMProvider
 
 DEFAULT_MAX_TOKENS = 8192
@@ -30,14 +31,7 @@ DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 def _max_tokens() -> int:
     """Per-call output cap. Larger than the old 2048 so a multi-tool step isn't truncated, but a
     bad/zero value falls back to the default rather than disabling the cap."""
-    raw = os.getenv("EYE_LLM_MAX_TOKENS")
-    if raw is None:
-        return DEFAULT_MAX_TOKENS
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_MAX_TOKENS
-    return value if value > 0 else DEFAULT_MAX_TOKENS
+    return env_int("EYE_LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS, minimum=1)
 
 
 def _load_file_config() -> dict:

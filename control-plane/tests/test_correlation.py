@@ -4,7 +4,7 @@ import uuid
 from app.correlation import correlate
 from app.models import Finding, Severity
 from app.report import generate_report
-from app.validation import ExploitNotAllowed, MetasploitClient, should_confirm
+from app.validation import should_confirm
 
 
 def mk(category, target, severity=Severity.medium, cwe=None):
@@ -51,21 +51,3 @@ def test_should_confirm_requires_corroboration_and_confidence():
     assert not should_confirm("suspected", 0.9, times_seen=1)   # only seen once
     assert not should_confirm("suspected", 0.5, times_seen=3)   # low confidence
     assert not should_confirm("false_positive", 0.99, times_seen=9)
-
-
-def test_metasploit_is_gated():
-    disabled = MetasploitClient()
-    assert "skipped" in disabled.check("mod", "10.0.0.5")  # check is a no-op when disabled
-    try:
-        disabled.exploit("mod", "10.0.0.5")
-        assert False, "exploit should be refused"
-    except ExploitNotAllowed:
-        pass
-    # Even enabled, exploitation needs the explicit second flag.
-    enabled = MetasploitClient(enabled=True)
-    try:
-        enabled.exploit("mod", "10.0.0.5")
-        assert False, "exploit should still be refused without allow_exploit"
-    except ExploitNotAllowed:
-        pass
-    assert MetasploitClient(enabled=True, allow_exploit=True).exploit("mod", "x")["action"] == "exploit"

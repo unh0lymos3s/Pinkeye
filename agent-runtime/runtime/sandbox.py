@@ -13,12 +13,27 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from .envutil import env_int
+
+# The container has memory/CPU/pids ceilings but its *output* had none: `container.logs()`
+# materializes the whole stream as bytes inside the API process, so a huge nmap XML, a ZAP JSON, or
+# a looping/hostile tool could pull hundreds of MB into the process that also serves every request.
+# Cap it, and record that the cap was hit so a partial parse is visible rather than silent.
+DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+
+def _max_output_bytes() -> int:
+    return env_int("EYE_TOOL_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES, minimum=1)
+
 
 @dataclass
 class SandboxResult:
     exit_code: int
     stdout: bytes
     stderr: bytes
+    # True when the stream hit EYE_TOOL_MAX_OUTPUT_BYTES and was cut short.
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
 
 class DockerSandbox:
@@ -61,9 +76,12 @@ class DockerSandbox:
             self._apply_egress(container, egress)
         try:
             result = container.wait(timeout=self._timeout)
-            stdout = container.logs(stdout=True, stderr=False)
-            stderr = container.logs(stdout=False, stderr=True)
-            return SandboxResult(exit_code=result.get("StatusCode", -1), stdout=stdout, stderr=stderr)
+            cap = _max_output_bytes()
+            stdout, stdout_cut = _capped_logs(container, cap, stdout=True, stderr=False)
+            stderr, stderr_cut = _capped_logs(container, cap, stdout=False, stderr=True)
+            return SandboxResult(exit_code=result.get("StatusCode", -1), stdout=stdout,
+                                 stderr=stderr, stdout_truncated=stdout_cut,
+                                 stderr_truncated=stderr_cut)
         finally:
             # Always tear the container down, even on timeout or error.
             container.remove(force=True)
@@ -82,3 +100,29 @@ class DockerSandbox:
         import subprocess
 
         subprocess.run([enforcer, container.id], check=False)
+
+
+def _capped_logs(container, cap: int, *, stdout: bool, stderr: bool) -> tuple[bytes, bool]:
+    """Read one of the container's streams, stopping at `cap` bytes.
+
+    Streams by preference so the full payload is never resident: chunks are accumulated only up to
+    the cap and the rest is abandoned. Falls back to a single read + slice for clients/fakes whose
+    `logs()` does not support `stream=True`, which still bounds what is handed on to the parser and
+    the hasher (the transient full read is unavoidable on that path).
+    """
+    try:
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in container.logs(stdout=stdout, stderr=stderr, stream=True):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= cap:
+                data = b"".join(chunks)
+                return data[:cap], total > cap
+        return b"".join(chunks), False
+    except TypeError:
+        pass  # a logs() that doesn't accept stream=
+    data = container.logs(stdout=stdout, stderr=stderr) or b""
+    return data[:cap], len(data) > cap

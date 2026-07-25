@@ -26,6 +26,10 @@ from ..tools.base import ToolOutput
 from .client import MCPClient, MCPError, _content_text
 
 _MAX_FINDINGS = 200  # bound a chatty server so one call can't flood the graph
+# Ceiling on the inlined source carried by one `file_content` call. max_files x max_bytes alone
+# allows a ~40 MB single line-framed JSON-RPC message (200 files x 200 KB), all of it resident in
+# this process while it is built, serialized, and written. Cap the aggregate too.
+_DEFAULT_MAX_TOTAL_BYTES = 8_000_000
 
 
 @dataclass
@@ -67,6 +71,7 @@ class MCPServerSpec:
     timeout: float = 120.0
     max_files: int = 200  # bound for directory expansion
     max_bytes: int = 200_000  # per-file read cap for file_content mode
+    max_total_bytes: int = _DEFAULT_MAX_TOTAL_BYTES  # aggregate cap across all files in one call
 
     @classmethod
     def from_dict(cls, data: dict) -> "MCPServerSpec":
@@ -94,6 +99,7 @@ class MCPServerSpec:
             timeout=float(data.get("timeout", 120.0)),
             max_files=int(data.get("max_files", 200)),
             max_bytes=int(data.get("max_bytes", 200_000)),
+            max_total_bytes=int(data.get("max_total_bytes", _DEFAULT_MAX_TOTAL_BYTES)),
         )
 
     def shape_target(self, target: str):
@@ -102,7 +108,8 @@ class MCPServerSpec:
             return _path_objects(target, self.path_key, self.max_files)
         if self.target_mode == "file_content":
             return _path_objects(target, self.path_key, self.max_files,
-                                 content_key=self.content_key, max_bytes=self.max_bytes)
+                                 content_key=self.content_key, max_bytes=self.max_bytes,
+                                 max_total_bytes=self.max_total_bytes)
         return target
 
     def launch_argv(self) -> tuple[str, list[str], dict]:
@@ -255,20 +262,27 @@ class MCPBackedTool:
 
 
 def _path_objects(target: str, path_key: str, max_files: int,
-                  content_key: str | None = None, max_bytes: int = 200_000) -> list[dict]:
+                  content_key: str | None = None, max_bytes: int = 200_000,
+                  max_total_bytes: int = _DEFAULT_MAX_TOTAL_BYTES) -> list[dict]:
     """Build [{path_key: <abs path>}] for a file, or one entry per file under a directory (bounded).
     When `content_key` is set, each entry also carries the file's text under that key (for
-    inline-content MCP tools). The target is already scope-authorized (surface='artifact' ->
-    allowed_artifacts) before we get here."""
+    inline-content MCP tools), and the *aggregate* inlined content is capped at `max_total_bytes` so
+    one call can't build a tens-of-megabytes JSON-RPC message. The target is already scope-authorized
+    (surface='artifact' -> allowed_artifacts) before we get here."""
+    remaining = max_total_bytes
 
     def entry(abs_path: str) -> dict:
+        nonlocal remaining
         item = {path_key: abs_path}
         if content_key is not None:
+            text = ""
             try:
                 with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
-                    item[content_key] = fh.read(max_bytes)
+                    text = fh.read(max(0, min(max_bytes, remaining)))
             except OSError:
-                item[content_key] = ""
+                text = ""
+            remaining -= len(text)
+            item[content_key] = text
         return item
 
     if os.path.isdir(target):
@@ -277,7 +291,8 @@ def _path_objects(target: str, path_key: str, max_files: int,
             dirs[:] = [d for d in dirs if not d.startswith(".")]  # skip .git and friends
             for fn in files:
                 items.append(entry(os.path.abspath(os.path.join(root, fn))))
-                if len(items) >= max_files:
+                # Stop on either bound: file count, or total inlined bytes.
+                if len(items) >= max_files or (content_key is not None and remaining <= 0):
                     return items
         return items
     return [entry(os.path.abspath(target))]

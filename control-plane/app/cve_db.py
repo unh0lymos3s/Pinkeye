@@ -28,9 +28,18 @@ class CveRepo:
         self._db = db
 
     def seed(self, records: list[dict]) -> int:
+        # One executemany for the whole file: an NVD export is tens of thousands of rows, and a
+        # round trip per row makes seeding the dominant cost of a cold start.
+        rows = [
+            (r["cve_id"], r["product"], r.get("version"), r.get("cvss_score"),
+             r.get("cvss_vector"), r.get("cwe"), r.get("description"), r.get("published"))
+            for r in records or []
+        ]
+        if not rows:
+            return 0
         with self._db.connection() as conn:
-            for r in records:
-                conn.execute(
+            with conn.cursor() as cur:
+                cur.executemany(
                     """
                     INSERT INTO cves (cve_id, product, version, cvss_score, cvss_vector, cwe, description, published)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -39,10 +48,9 @@ class CveRepo:
                         cvss_score = EXCLUDED.cvss_score, cvss_vector = EXCLUDED.cvss_vector,
                         cwe = EXCLUDED.cwe, description = EXCLUDED.description
                     """,
-                    (r["cve_id"], r["product"], r.get("version"), r.get("cvss_score"),
-                     r.get("cvss_vector"), r.get("cwe"), r.get("description"), r.get("published")),
+                    rows,
                 )
-        return len(records)
+        return len(rows)
 
     def lookup(self, product: str, version: str | None = None, limit: int = 25) -> list[CveRecord]:
         clauses = ["lower(product) LIKE %s"]

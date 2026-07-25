@@ -5,21 +5,8 @@ from __future__ import annotations
 import json
 import os
 
+from ..envutil import env_float, env_int
 from .base import LLMProvider, Message, ProviderResponse, ToolCall, ToolSpec
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, ""))
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, ""))
-    except ValueError:
-        return default
 
 
 def _resolve_api_key(explicit: str | None) -> str:
@@ -46,8 +33,8 @@ class OpenAICompatProvider(LLMProvider):
             self._client = openai.OpenAI(
                 base_url=self._base_url,
                 api_key=_resolve_api_key(self._api_key),
-                timeout=_env_float("EYE_LLM_TIMEOUT", 120.0),
-                max_retries=_env_int("EYE_LLM_MAX_RETRIES", 1),
+                timeout=env_float("EYE_LLM_TIMEOUT", 120.0),
+                max_retries=env_int("EYE_LLM_MAX_RETRIES", 1),
             )
         return self._client
 
