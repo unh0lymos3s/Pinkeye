@@ -30,5 +30,13 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["runtime*"]
 
+# The persona roster ships *inside* the package. Without this, `packages.find` collects only .py
+# files and `agents.toml` never reaches site-packages — the installed image would silently fall back
+# to the built-in roster literal in personas.py, and the config file an operator is meant to edit
+# would not exist in the container at all. A deployment where the documented knob is absent but
+# everything still "works" is the worst version of this bug, so keep the data file packaged.
+[tool.setuptools.package-data]
+runtime = ["*.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

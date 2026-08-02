@@ -82,10 +82,18 @@ class RunEventKind(str, Enum):
     user_reply = "user_reply"    # the operator's reply, echoed into the transcript
     subagent_started = "subagent_started"    # the orchestrator delegated to a specialist sub-agent
     subagent_finished = "subagent_finished"  # a specialist sub-agent returned its summary
+    # B3: a loud, operator-facing notice independent of any tool step -- today only used for "the
+    # scope guard is disabled for this engagement", emitted once right after `plan`. Deliberately its
+    # own kind rather than overloading `error` (nothing failed) or `status` (the run isn't changing
+    # lifecycle state), so the chat UI can render it as a persistent banner, not a transient bubble.
+    warning = "warning"
 
 
 # A run is over once one of these terminal statuses is emitted; the SSE generator drains and closes.
-TERMINAL_STATUSES = {"completed", "failed", "rejected"}
+# "aborted" (operator-requested cancellation via POST /runs/{id}/abort) is terminal exactly like the
+# other three: the stream closes, RunInbox/RunCancels retire, and the web client treats it identically
+# to completed/failed for the purpose of "is this run still live".
+TERMINAL_STATUSES = {"completed", "failed", "rejected", "aborted"}
 
 
 class RunEvent(BaseModel):
@@ -104,6 +112,18 @@ class RunEventSink(Protocol):
     """What `run_agent(events=...)` needs: assign a seq, record the event, hand it back."""
 
     def emit(self, run_id: str, engagement_id: str, kind: str, /, **data) -> RunEvent: ...
+
+
+class _Wake:
+    """Sentinel placed on a `RunInbox` queue by `wake()` to unblock a waiting run thread without
+    delivering an operator reply. A distinct type (rather than `None` or `""`) so it can never be
+    confused with a real, if oddly empty, reply string — `wait()` unwraps it back to `None` before
+    handing anything to the caller."""
+
+    __slots__ = ()
+
+
+_WAKE = _Wake()
 
 
 class RunInbox:
@@ -183,10 +203,13 @@ class RunInbox:
             self._seen.pop(run_id, None)
 
     def wait(self, run_id: str, timeout: float) -> Optional[str]:
-        """Block the run thread until a reply arrives or `timeout` seconds pass (None on timeout)."""
+        """Block the run thread until a reply arrives or `timeout` seconds pass (None on timeout —
+        and also None for a `wake()`: a wake carries no reply, it only guarantees this call doesn't
+        outlive the ask timeout when the run is being aborted. Reacting to *why* it returned is the
+        caller's job — `run_agent` checks cancellation immediately after this returns)."""
         q = self._q(run_id, waiting=True)
         try:
-            return q.get(timeout=timeout)
+            item = q.get(timeout=timeout)
         except queue.Empty:
             return None
         finally:
@@ -196,10 +219,84 @@ class RunInbox:
                     self._waiting[run_id] = remaining
                 else:
                     self._waiting.pop(run_id, None)
+        return None if item is _WAKE else item
 
     def deliver(self, run_id: str, text: str) -> None:
         """Hand a reply to whichever run thread is (or will be) waiting."""
         self._q(run_id).put(text)
+
+    def wake(self, run_id: str) -> None:
+        """Unblock a run thread parked in `wait` without delivering a reply.
+
+        Used when an operator aborts a run that is currently blocked inside `ask_user` — without
+        this, the run would sit there for up to the ask timeout (10 minutes by default) before its
+        next cooperative cancellation check ever ran. A real reply landing at the same time still
+        races normally: whichever the queue hands out first is what `wait()` returns."""
+        self._q(run_id).put(_WAKE)
+
+
+class RunCancels:
+    """Cooperative cancellation flags: `POST /runs/{id}/abort` (a request thread) calls `request()`;
+    `run_agent`'s loop (the run's background thread) polls `is_cancelled` at every point it can honour
+    an abort promptly — the top of its provider-call loop, before dispatching each tool call in a
+    batch, and right after `ask_user` returns — and unwinds to `RunStatus.aborted` the moment it sees
+    one set. One flag per run; thread-safe.
+
+    Modeled on `RunInbox` immediately above, for the same reason: a dict keyed by run_id that only
+    ever grows is the unbounded-per-run-state bug this codebase has already been burned by (§4). Only
+    `request()` can grow this structure, so that is where the idle sweep runs; `is_cancelled` merely
+    reads, except that finding a *cancelled* run refreshes its touch time so an actively-polling run
+    is never swept out from under itself before `retire()` (wired to the same terminal-status hook as
+    `RunInbox.retire`) runs.
+    """
+
+    def __init__(self, retention_seconds: float | None = None) -> None:
+        self._lock = threading.Lock()
+        self._cancelled: set[str] = set()
+        # run_id -> monotonic time of last touch, in touch order, mirroring RunInbox._seen.
+        self._seen: "OrderedDict[str, float]" = OrderedDict()
+        self._retention = RUN_RETENTION_SECONDS if retention_seconds is None else retention_seconds
+
+    def request(self, run_id: str) -> None:
+        """Mark a run for cancellation. Idempotent, and safe for a run_id nobody ever polls for — the
+        loop simply never observes itself cancelled in that case, and the sweep here still bounds how
+        long the flag can outlive a run that is never explicitly retired."""
+        now = time.monotonic()
+        with self._lock:
+            self._cancelled.add(run_id)
+            self._seen[run_id] = now
+            self._seen.move_to_end(run_id)
+            self._sweep(now)
+
+    def is_cancelled(self, run_id: str) -> bool:
+        """Poll from the run's own thread. A run that was never cancelled creates no state here —
+        only `request()` grows the map, so a run loop checking its own (never-aborted) run_id can
+        never inflate it."""
+        with self._lock:
+            cancelled = run_id in self._cancelled
+            if cancelled:
+                now = time.monotonic()
+                self._seen[run_id] = now
+                self._seen.move_to_end(run_id)
+            return cancelled
+
+    def retire(self, run_id: str) -> None:
+        """Forget a finished run's cancellation flag. Safe to call for an unknown run. Wired to
+        `RunEventStore.on_retire` alongside `RunInbox.retire` (see control-plane/app/main.py)."""
+        with self._lock:
+            self._cancelled.discard(run_id)
+            self._seen.pop(run_id, None)
+
+    def _sweep(self, now: float) -> None:
+        """Drop idle entries this process never explicitly retired (e.g. an abort request for a
+        run_id that turned out not to exist, or a run whose retire hook never fired). Caller holds
+        `self._lock`."""
+        while self._seen:
+            run_id, seen = next(iter(self._seen.items()))
+            if now - seen <= self._retention:
+                break  # touch-ordered: everything behind this entry is younger still
+            self._seen.pop(run_id, None)
+            self._cancelled.discard(run_id)
 
 
 class RunEventStore:

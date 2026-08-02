@@ -66,6 +66,14 @@ x-control-plane-env: &control-plane-env
   # `docker compose build mcp-snyk` before first use.
   SNYK_TOKEN: ${SNYK_TOKEN:-}
   EYE_SRC_ROOT: ${EYE_SRC_ROOT:-/samples}
+  # The agent-personality roster (Scout/Viper/Warden/Oracle/Reaper/Ghost/Overseer/Jack). The file is
+  # packaged into the image, but it is *also* bind-mounted from the repo (see `volumes` on api and
+  # worker) and pointed at here — so editing agent-runtime/runtime/agents.toml on the host and
+  # restarting the container is enough to reshape the roster. Without this the packaged copy wins and
+  # host edits would appear to do nothing until the image was rebuilt.
+  # Capability metadata only: a persona listing `exploit` still cannot run it without the signed
+  # scope flag, so nothing here widens what a run is authorized to do.
+  EYE_AGENTS_CONFIG: /app/config/agents.toml
   # Root for codebases uploaded via the SAST tab. It is bind-mounted at the SAME absolute path on
   # the host and in this container (below), and read-only into the Snyk sibling (mounts), so an
   # extracted path means the same thing to the api, the disposable sandbox, and the MCP server.
@@ -135,6 +143,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /eye-uploads:/eye-uploads
+      # Live persona roster — see EYE_AGENTS_CONFIG above. Read-only: the roster is operator input,
+      # nothing in the running stack should be able to rewrite it.
+      - ../agent-runtime/runtime/agents.toml:/app/config/agents.toml:ro
 
   # Scan worker: drains the durable job queue. Scale with `docker compose up --scale worker=N` for
   # throughput -- but each replica (and `api`) opens its OWN Postgres pool sized by EYE_PG_POOL_MAX
@@ -155,6 +166,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /eye-uploads:/eye-uploads
+      # The worker runs the same agent loop as `api`, so it must resolve the same roster — a persona
+      # that exists for one and not the other would make a run behave differently by route.
+      - ../agent-runtime/runtime/agents.toml:/app/config/agents.toml:ro
 
   # Build-only: produces the hardened Snyk MCP server image the pool launches as a sibling. It is not
   # started by `up` (the pool runs it on demand); build it with `docker compose build mcp-snyk`.

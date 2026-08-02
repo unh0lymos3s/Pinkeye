@@ -54,8 +54,23 @@ def stage_of(tool_name: str) -> str:
 def tools_for_stage(stage: str) -> list[str]:
     """Return the tool names mapped to a pipeline stage — the reverse of `_TOOL_STAGE`.
 
-    This is the single source of truth for a specialist sub-agent's tool subset: a specialist owns
-    a stage, and its tools are exactly the tools that render under that stage in the pipeline rail.
-    A stage with no tool of its own (e.g. "report") returns an empty list.
+    Historically this was the single source of truth for a specialist sub-agent's tool subset. It
+    no longer is: personas (`runtime/personas.py`) now own an explicit `tools` list loaded from
+    config, so a persona's toolkit is whatever the roster says, not whatever shares its stage label.
+    This function still backs the pipeline rail's "what tools live under this stage" presentation
+    and the persona loader's validation of registered tool names. A stage with no tool of its own
+    (e.g. "report") returns an empty list.
     """
     return [name for name, mapped in _TOOL_STAGE.items() if mapped == stage]
+
+
+def known_tool_names() -> frozenset[str]:
+    """The full set of registered tool names, for validating config against reality.
+
+    `_TOOL_STAGE` is kept exhaustive (see its comment), so it doubles as the canonical name list
+    without pulling in `toolset.all_tools()` — which needs a live db handle for the knowledge tools
+    and would drag a control-plane import into this presentation-only module. Used by
+    `personas.load_personas` to drop (never invent) an unregistered tool named in the config, and to
+    fill in the generalist persona's "every tool" list.
+    """
+    return frozenset(_TOOL_STAGE)

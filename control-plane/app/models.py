@@ -60,6 +60,11 @@ class Scope(BaseModel):
     # guard rejects it — the model cannot enable exploitation or credential attacks on its own.
     allow_exploit: bool = False
     allow_credential_attacks: bool = False
+    # B3: an opt-in, operator-facing bypass of the target-allowlist match in `scope.authorize()` —
+    # signature validity, the time window, and the intensity ceiling are still enforced, and it never
+    # loosens `execute_tool_step`'s separate `requires_flag` gate on exploitation/credential tools.
+    # Defaults True (guard on) so existing callers that never set it behave exactly as before.
+    scope_guard_enabled: bool = True
     signature: Optional[str] = None
 
     def canonical(self) -> str:
@@ -67,18 +72,24 @@ class Scope(BaseModel):
         cidrs = ",".join(sorted(self.allowed_cidrs))
         domains = ",".join(sorted(d.lower() for d in self.allowed_domains))
         artifacts = ",".join(sorted(self.allowed_artifacts))
-        return "|".join(
-            [
-                cidrs,
-                domains,
-                artifacts,
-                self.not_before.astimezone(timezone.utc).isoformat(),
-                self.not_after.astimezone(timezone.utc).isoformat(),
-                self.max_intensity.value,
-                f"exploit={int(self.allow_exploit)}",
-                f"creds={int(self.allow_credential_attacks)}",
-            ]
-        )
+        parts = [
+            cidrs,
+            domains,
+            artifacts,
+            self.not_before.astimezone(timezone.utc).isoformat(),
+            self.not_after.astimezone(timezone.utc).isoformat(),
+            self.max_intensity.value,
+            f"exploit={int(self.allow_exploit)}",
+            f"creds={int(self.allow_credential_attacks)}",
+        ]
+        if not self.scope_guard_enabled:
+            # Appended only when the guard is OFF, so the canonical string — and therefore the
+            # signature — for every guard-on scope (the default, and every scope signed before this
+            # field existed) is byte-for-byte identical to before this field existed. Disabling the
+            # guard is the one state that must invalidate an old signature (forcing a re-sign through
+            # the admin-only PATCH endpoint); leaving it on must never require re-signing anything.
+            parts.append("guard=0")
+        return "|".join(parts)
 
 
 class Engagement(BaseModel):
@@ -94,6 +105,7 @@ class RunStatus(str, Enum):
     completed = "completed"
     failed = "failed"
     rejected = "rejected"  # blocked by the scope guard before any tool ran
+    aborted = "aborted"    # cancelled mid-flight by an operator via POST /runs/{id}/abort
 
 
 class Run(BaseModel):

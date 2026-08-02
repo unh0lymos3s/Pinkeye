@@ -6,7 +6,7 @@ import { useState } from "react";
 import Link from "next/link";
 import EngagementPicker from "./EngagementPicker";
 import EyeOrb from "./EyeOrb";
-import { createEngagement, createRun } from "../lib/api";
+import { createEngagement, createRun, updateScopeGuard } from "../lib/api";
 import { useEngagement } from "../lib/useEngagement";
 import { useLastRun } from "../lib/useLastRun";
 
@@ -97,6 +97,10 @@ export default function Home() {
   const { setLastRunId } = useLastRun(selected);
   const [name, setName] = useState("lab-engagement");
   const [cidrs, setCidrs] = useState("10.0.0.0/24");
+  // Scope guard defaults ON — this is an opt-in bypass, never a default-off setting, so a form the
+  // operator submits without touching this checkbox produces the same fully-guarded engagement it
+  // always has.
+  const [scopeGuard, setScopeGuard] = useState(true);
   const [target, setTarget] = useState("10.0.0.5");
   const [mode, setMode] = useState<"scan" | "agent">("scan");
   const [tool, setTool] = useState("nmap");
@@ -105,6 +109,16 @@ export default function Home() {
   const [status, setStatus] = useState("");
   const [engOpen, setEngOpen] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
+  // Toggling the guard on an *existing* engagement is a separate action from the create form
+  // above (disabling requires an admin key); tracked independently so it can show its own busy/
+  // error state without disturbing the create-engagement fields.
+  const [guardBusy, setGuardBusy] = useState(false);
+  const [guardStatus, setGuardStatus] = useState("");
+
+  const activeEngagement = engagements.find((e) => e.id === selected);
+  // Absent `scope` (older control-plane build, or an engagement created before this shipped)
+  // means the guard is on — that is the documented server-side default.
+  const guardEnabled = activeEngagement?.scope?.scope_guard_enabled ?? true;
 
   async function onCreate() {
     if (!name.trim()) return;
@@ -115,6 +129,7 @@ export default function Home() {
         name: name.trim(),
         allowed_cidrs: cidrs.split(",").map((s) => s.trim()).filter(Boolean),
         allowed_domains: [],
+        scope_guard_enabled: scopeGuard,
       });
       await refresh();
       select(eng.id);
@@ -123,6 +138,23 @@ export default function Home() {
       setStatus(`error: ${String(e)}`);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onToggleGuard() {
+    if (!selected || guardBusy) return;
+    setGuardBusy(true);
+    setGuardStatus(guardEnabled ? "disabling scope guard…" : "re-enabling scope guard…");
+    try {
+      await updateScopeGuard(selected, !guardEnabled);
+      await refresh();
+      setGuardStatus("");
+    } catch (e) {
+      // A 403 here means the key is operator-not-admin — the shared auth-notice banner in the nav
+      // already surfaces that; this local status line just confirms nothing changed.
+      setGuardStatus(`error: ${String(e)}`);
+    } finally {
+      setGuardBusy(false);
     }
   }
 
@@ -196,10 +228,35 @@ export default function Home() {
                   <label>Allowed CIDRs (comma-separated)</label>
                   <input className="input" value={cidrs} onChange={(e) => setCidrs(e.target.value)} placeholder="10.0.0.0/24" />
                 </div>
+                <div className="field">
+                  <label>Scope guard</label>
+                  <label className="scope-guard-check" title="Off means every target is treated as in-scope for this engagement — an opt-in bypass, not a default.">
+                    <input type="checkbox" checked={scopeGuard} onChange={(e) => setScopeGuard(e.target.checked)} />
+                    {scopeGuard ? "On" : "Off — every target authorized"}
+                  </label>
+                </div>
                 <button className="btn" onClick={onCreate} disabled={busy || !name.trim()}>
                   Create
                 </button>
               </div>
+              {selected && (
+                <div className="scope-guard-row">
+                  <span className={`scope-guard-pill${guardEnabled ? "" : " off"}`}>
+                    {guardEnabled ? "🛡 scope guard on" : "⚠ scope guard disabled"}
+                  </span>
+                  <span className="dim" style={{ fontSize: 12.5 }}>
+                    for <b>{activeEngagement?.name || selected}</b>
+                  </span>
+                  <button className="mini-btn" onClick={onToggleGuard} disabled={guardBusy}>
+                    {guardBusy ? "…" : guardEnabled ? "Disable (admin)" : "Re-enable"}
+                  </button>
+                  {guardStatus && (
+                    <span className="dim" style={{ fontSize: 12 }}>
+                      {guardStatus}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

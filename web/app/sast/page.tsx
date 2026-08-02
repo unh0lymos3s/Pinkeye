@@ -23,7 +23,10 @@ import {
 import { useEngagement } from "../../lib/useEngagement";
 
 const RUN_KEY = "eye.sastRunId";
-const TERMINAL = new Set(["completed", "failed", "rejected"]);
+// "aborted" is terminal too (round 5): POST /runs/{id}/abort applies to any run, so a SAST scan can
+// reach it as well. Omitting it here would leave this page tailing a stream the server has already
+// closed, showing a live beat forever — the failure mode a terminal-status list exists to prevent.
+const TERMINAL = new Set(["completed", "failed", "rejected", "aborted"]);
 // SAST tools live on the "static scan" stage. Presentation labels only — the real tool names (left)
 // are what the backend runs; `semgrep` is the slot the pooled Snyk Code MCP server backs.
 const SAST_TOOLS = ["semgrep", "gitleaks", "trivy"];

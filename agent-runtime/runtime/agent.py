@@ -7,6 +7,7 @@ work around. Token and tool-call budgets bound cost and stop runaway loops.
 """
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 
 from app.audit import AuditSink
@@ -127,16 +128,99 @@ class AgentResult:
         return self.input_tokens + self.output_tokens
 
 
+def _no_output(step) -> bool:
+    """Round 6 — WS B: true when a step produced literally nothing for the parser to read — the
+    silent-zero failure the whole platform was found reporting as a clean scan (gitleaks defaulting
+    to git-history mode against a `.git`-less `/src`, trivy/nuclei needing a writable `/tmp` they
+    didn't have, zap/nikto/ffuf each failing before they ever touched the target — see
+    round6-contract.md). `_summarize` and `_run_one` both need to recognize this identically: one
+    picks the model-facing wording, the other decides whether to raise the operator-facing warning,
+    and they must never disagree about which steps triggered it.
+
+    Reads `output_bytes` with `getattr(..., None)` rather than assuming the field exists, since
+    `StepResult` gaining it is WS-A's change and may land before or after this one; a step that
+    predates the field reads as `None`, which correctly never equals 0 and so never trips this. The
+    `not findings and not services` guard is redundant with a genuinely empty payload (nothing parses
+    findings out of zero bytes) but costs nothing and keeps this from ever firing on a step that
+    somehow carries real results alongside a stale/default byte count of 0."""
+    if not step.allowed or step.error or step.note:
+        return False
+    return not step.findings and not step.services and getattr(step, "output_bytes", None) == 0
+
+
 def _summarize(step) -> str:
-    """The only thing the model sees from a tool run — a short, structured summary, never raw output."""
+    """The only thing the model sees from a tool run — a short, structured summary, never raw output.
+
+    Round 6 — WS B: a genuinely clean scan and a tool that scanned nothing used to render identically
+    (`0 services, 0 findings: no findings` either way), which is what let six of seven sandboxed tools
+    report a false "clean" result in production without anyone noticing. Below, `_no_output` and the
+    `parsed_ok` check give the model three distinguishable outcomes instead of two: no output at all,
+    output that arrived but didn't parse, and a real empty result — the last of which is only
+    trustworthy now that it can no longer be produced by the other two. Wording on the first two is
+    deliberately pointed: this text is the model's entire basis for its next decision, so it must push
+    toward investigating or switching tools, never toward concluding the target is clean."""
     if not step.allowed:
         return f"DENIED by scope guard: {step.reason}. Choose a different in-scope target."
     if step.error:
         return f"tool error: {step.error}"
-    if step.note:  # knowledge tools return their answer directly
+    if step.note:  # knowledge tools return their answer directly, before any output-byte check below
         return step.note
+    exit_code = getattr(step, "exit_code", None)
+    code_txt = f"exit={exit_code}" if exit_code is not None else "exit=unknown"
+    if _no_output(step):
+        return (
+            f"NO OUTPUT from this tool run ({code_txt}). It produced zero bytes to analyze — this is "
+            "NOT a clean scan and must NOT be reported as \"no findings\". The tool almost certainly "
+            "never actually scanned the target (broken invocation, missing writable path, wrong "
+            "mode, a dependency that failed silently). Investigate why it produced nothing, or try a "
+            "different tool — do not conclude the target is clean from this."
+        )
+    if not getattr(step, "parsed_ok", True):
+        output_bytes = getattr(step, "output_bytes", 0)
+        return (
+            f"UNPARSEABLE OUTPUT from this tool run ({code_txt}, {output_bytes} bytes received). The "
+            "tool produced output but it could not be parsed into results, so this is also NOT "
+            "evidence the target is clean — it's a different failure than silence, not a result. "
+            "Investigate the raw failure or try a different tool."
+        )
     titles = ", ".join(f.title for f in step.findings[:10]) or "no findings"
     return f"{len(step.services)} services, {len(step.findings)} findings: {titles}"
+
+
+def _abort(emit, result: "AgentResult") -> RunStatus:
+    """Round 5 — WS A: the shared shape for however the loop notices an operator abort (top of an
+    iteration, or mid tool-call batch) so the transcript reads the same regardless of where it was
+    caught. Emitted for nested specialists too — cutting a child short is worth showing in the
+    transcript, even though `_set_status` below is a no-op for them (a nested run never owns the
+    top-level run's lifecycle)."""
+    emit("warning", scope="abort", message="run aborted by operator")
+    result.stop_reason = "aborted by operator"
+    return RunStatus.aborted
+
+
+def _range_guidance(seed: str) -> str | None:
+    """B2: guidance for a seed target that is a *range*, not a single host.
+
+    Without this, a model faced with "seed target: 10.0.0.0/24" has no reason not to iterate 256
+    addresses one nmap call at a time — each a full single-host scan — which burns the whole
+    tool-call budget (and, per B2's nmap.py change, would previously also run each of those 256 calls
+    at `-Pn --top-ports 1000`, the slow/expensive shape meant for one host) before the run has
+    learned anything about the range as a whole. Returns None for a single host (bare IP, hostname,
+    or a `/32`-equivalent network), which needs no special-casing.
+    """
+    try:
+        network = ipaddress.ip_network(seed.strip(), strict=False)
+    except ValueError:
+        return None
+    if network.num_addresses <= 1:
+        return None
+    return (
+        f"Seed target {seed} is a range of {network.num_addresses} addresses, not a single host. "
+        "Run ONE host-discovery sweep against the whole range first, then work from the hosts it "
+        "discovers — do not iterate individual addresses one at a time, that will exhaust the "
+        "tool-call budget before you've covered the range. If the sweep finds nothing, say so and "
+        "stop rather than retrying variants of the same range."
+    )
 
 
 def _authorized_stages(scope) -> tuple[list[str], list[str]]:
@@ -170,6 +254,8 @@ def run_agent(
     specialist_pool: list | None = None,
     nested: bool = False,
     subagent: str | None = None,
+    persona=None,
+    cancels=None,
 ) -> AgentResult:
     budget = budget or Budget.from_env()
     result = AgentResult()
@@ -216,7 +302,21 @@ def run_agent(
             gated_stages=gated,
             seed_target=run.target,
             budget={"max_tool_calls": budget.max_tool_calls, "max_output_tokens": budget.max_output_tokens},
+            # Who the operator launched. The chat header reads this on reconnect: the persona picker's
+            # own state is local and resets to the default on reload, so without it a replayed Reaper
+            # run would render under the wrong name.
+            **_persona_fields(persona),
         )
+        if not getattr(engagement.scope, "scope_guard_enabled", True):
+            # B3: the guard's own bypass (scope.authorize()) is silent by design at the point of each
+            # decision — it just returns Allow — so the operator-facing loudness has to live here and
+            # in the audit trail, not in the model's tool-call flow. One event per run, right after
+            # the plan the operator is already looking at.
+            emit(
+                "warning",
+                scope="scope_guard",
+                message="scope guard is DISABLED for this engagement — every target is authorized",
+            )
 
     _set_status(RunStatus.running)
     system_prompt = mission
@@ -225,10 +325,14 @@ def run_agent(
     # host that has fallen out of scope can never be re-authorized by its presence here.
     known_map = _known_map_message(memory, engagement.id)
     seed = seed_target or run.target
+    # B2: tell the model up front when the seed is a range, not a single host — see _range_guidance.
+    range_notice = _range_guidance(seed)
     messages = [
         Message(role="system", content=system_prompt),
         Message(role="user", content=f"Seed target: {seed}. Begin."),
     ]
+    if range_notice:
+        messages.insert(1, Message(role="system", content=range_notice))
     if known_map:
         messages.insert(1, Message(role="system", content=known_map))
     # Always offer ask_user alongside the tool set so the agent can reach the operator. In orchestrator
@@ -245,7 +349,20 @@ def run_agent(
 
     stop_status = RunStatus.completed
     keep_blocks = env_int("EYE_AGENT_HISTORY_BLOCKS", DEFAULT_HISTORY_BLOCKS, minimum=0)
+    # B2: repeat-call guard. (tool, normalized target, intensity) triples already run *this* run_agent
+    # invocation — top-level, or one nested specialist call, each gets its own empty set. A model
+    # re-running the identical call gets the identical result, so on a wide range this pattern alone
+    # can burn the whole tool-call budget without ever learning anything new; a duplicate is refused
+    # in `_run_one` before it reaches the sandbox, still counting against the budget (that accounting
+    # happens in the loop below, unconditionally, regardless of what `_run_one` did).
+    seen_calls: set[tuple[str, str, str]] = set()
     while True:
+        # Round 5 — WS A: checked before every LLM call, the cheapest and most frequent point the
+        # loop passes through, so an abort requested between tool calls (or while idle) is honoured
+        # without waiting for a running batch to finish.
+        if cancels is not None and cancels.is_cancelled(run.id):
+            stop_status = _abort(emit, result)
+            break
         # Roll up old exchanges before resending the conversation, so input tokens stop growing
         # quadratically over a long run. Never splits an assistant tool_use from its tool_result.
         messages = _compact_history(messages, keep_blocks)
@@ -274,7 +391,19 @@ def run_agent(
             break
 
         messages.append(Message(role="assistant", content=resp.text, tool_calls=resp.tool_calls))
+        # Round 5 — WS A: sticky for the rest of this batch once set, so a cancellation noticed
+        # partway through a parallel batch skips every remaining call rather than only the one being
+        # checked — a model that returned ten parallel calls must not get to run the last nine just
+        # because only the first one was checked before the flag flipped.
+        cancelled_mid_batch = False
         for tc in resp.tool_calls:
+            if cancelled_mid_batch or (cancels is not None and cancels.is_cancelled(run.id)):
+                # Same discipline as the budget-exhausted branch below: every skipped tool_use still
+                # gets a matching tool_result so the history never goes structurally invalid.
+                cancelled_mid_batch = True
+                messages.append(Message(role="tool", tool_call_id=tc.id,
+                                        content="skipped: run aborted by operator"))
+                continue
             if result.tool_calls_used >= budget.max_tool_calls:
                 # The budget is checked *inside* the batch: a model that returns ten parallel calls
                 # on the last permitted step must not get to execute all ten. Each skipped tool_use
@@ -285,18 +414,27 @@ def run_agent(
             if tc.name == "ask_user":
                 # Interactive step: emit the question, block for the operator's reply, feed it back.
                 summary = _ask_user(engagement, run, tc, emit, inbox)
+                # The operator may have hit abort while this call sat blocked on the reply —
+                # `inbox.wake()` (events.py) makes `wait()` return promptly instead of riding out the
+                # ask timeout, but only this check actually reacts to it. Check right away so the run
+                # doesn't act on stale guidance before the rest of the batch notices.
+                if cancels is not None and cancels.is_cancelled(run.id):
+                    cancelled_mid_batch = True
             elif orchestrating and tc.name in SPECIALIST_KINDS:
                 # Delegate to a specialist sub-agent that runs in its own isolated context. Its
                 # tool-call/token usage is folded back into this run's budget so the tree stays bounded.
                 summary = _dispatch_specialist(
                     tc, run_specialist, engagement, run, provider, sandbox, graph, audit, db,
-                    context, events, memory, inbox, specialist_pool, budget, result, emit)
+                    context, events, memory, inbox, specialist_pool, budget, result, emit, cancels)
             else:
                 summary = _run_one(engagement, run, tc, registry, sandbox, graph, audit, db, result,
-                                   context, emit, memory)
+                                   context, emit, memory, seen_calls)
             messages.append(Message(role="tool", content=summary, tool_call_id=tc.id))
             result.tool_calls_used += 1
 
+        if cancelled_mid_batch:
+            stop_status = _abort(emit, result)
+            break
         if result.tool_calls_used >= budget.max_tool_calls:
             result.stop_reason = "tool-call budget reached"
             break
@@ -429,10 +567,15 @@ def _ask_user(engagement, run, tc, emit, inbox) -> str:
 
 
 def _dispatch_specialist(tc, run_specialist, engagement, run, provider, sandbox, graph, audit, db,
-                         context, events, memory, inbox, specialist_pool, budget, result, emit) -> str:
+                         context, events, memory, inbox, specialist_pool, budget, result, emit,
+                         cancels=None) -> str:
     """Run one specialist sub-agent the orchestrator delegated to. Emits subagent_started/finished
     around a nested run_agent, carves the child's budget from the parent's remaining budget, and folds
-    the child's tool-call/token/finding usage back so the whole tree stays inside one run budget."""
+    the child's tool-call/token/finding usage back so the whole tree stays inside one run budget.
+
+    `cancels` (round 5 — WS A) is forwarded to the child's own `run_agent` call so an operator abort
+    stops a specialist mid-pass too, rather than letting it run out its whole carved-off budget first —
+    the child polls the exact same shared flag, it's just a different `run_agent` invocation."""
     from .subagents import SPECIALISTS
 
     args = tc.arguments or {}
@@ -441,17 +584,21 @@ def _dispatch_specialist(tc, run_specialist, engagement, run, provider, sandbox,
     focus = args.get("focus")
     spec = SPECIALISTS.get(kind)
     stage = spec.stage if spec else kind
+    # Persona identity, stamped on every event this dispatch emits so the transcript can render the
+    # sub-agent as itself ("💀 Reaper") rather than a bare id. Empty when the roster has no entry for
+    # `kind`, in which case the UI falls back to `specialist` — a stale id degrades to the old label.
+    who = _persona_fields(spec)
     if not target:
-        emit("subagent_finished", specialist=kind, stage=stage, error="missing 'target' argument")
+        emit("subagent_finished", specialist=kind, stage=stage, error="missing 'target' argument", **who)
         return f"specialist '{kind}' needs a 'target' argument"
 
     remaining_calls = budget.max_tool_calls - result.tool_calls_used
     remaining_tokens = budget.max_output_tokens - result.total_tokens
     if remaining_calls <= 0 or remaining_tokens <= 0:
-        emit("subagent_finished", specialist=kind, stage=stage, error="run budget exhausted")
+        emit("subagent_finished", specialist=kind, stage=stage, error="run budget exhausted", **who)
         return f"cannot dispatch '{kind}': the run budget is exhausted — summarize and stop"
 
-    emit("subagent_started", specialist=kind, stage=stage, target=target, focus=focus)
+    emit("subagent_started", specialist=kind, stage=stage, target=target, focus=focus, **who)
     # The provider instance is shared with every specialist, and a nested run_agent rebinds
     # `on_refusal` to its own emitter (which stamps subagent=kind). Without restoring it, this
     # orchestrator's later refusals would be attributed to the last specialist that ran.
@@ -461,7 +608,7 @@ def _dispatch_specialist(tc, run_specialist, engagement, run, provider, sandbox,
             kind, target, focus, engagement=engagement, run=run, provider=provider, sandbox=sandbox,
             graph=graph, audit=audit, db=db, context=context, events=events, memory=memory,
             inbox=inbox, pool=specialist_pool or [], remaining_calls=remaining_calls,
-            remaining_tokens=remaining_tokens)
+            remaining_tokens=remaining_tokens, cancels=cancels)
     finally:
         if hasattr(provider, "on_refusal"):
             provider.on_refusal = previous_on_refusal
@@ -470,14 +617,37 @@ def _dispatch_specialist(tc, run_specialist, engagement, run, provider, sandbox,
     result.input_tokens += in_tokens
     result.findings += findings
     emit("subagent_finished", specialist=kind, stage=stage, summary=summary, findings=findings,
-         tool_calls=calls)
+         tool_calls=calls, **who)
     return summary
 
 
-def _run_one(engagement, run, tc, registry, sandbox, graph, audit, db, result, context, emit, memory) -> str:
+def _persona_fields(persona) -> dict:
+    """The persona identity carried on run/sub-agent events: who is acting, under what label and
+    glyph. Presentation only — the roster decides which tools a persona is *offered*, and the scope
+    guard plus the signed-scope flags decide what it may actually run. A missing persona yields an
+    empty dict rather than placeholder values, so the UI's fallback path stays distinguishable from
+    a persona that genuinely has no label."""
+    if persona is None:
+        return {}
+    return {
+        "persona": getattr(persona, "id", None),
+        "persona_label": getattr(persona, "label", None),
+        "glyph": getattr(persona, "glyph", None),
+        "accent": getattr(persona, "accent", None),
+    }
+
+
+def _run_one(engagement, run, tc, registry, sandbox, graph, audit, db, result, context, emit, memory,
+             seen_calls: set | None = None) -> str:
     """Validate + execute a single tool call the model proposed, returning the summary it will see.
     Emits the presentation events (tool_call / tool_started / finding / tool_finished / memory_delta)
-    around the unchanged execute_tool_step spine."""
+    around the unchanged execute_tool_step spine.
+
+    `seen_calls` is the run's repeat-call guard (B2): a mutable set of `(tool, target, intensity)`
+    triples already executed this run_agent invocation. `None` (the default) disables the guard for
+    callers that don't track one — every current caller does, so this only exists as a safety default,
+    never as a way to silently skip the check.
+    """
     tool = registry.get(tc.name)
     if tool is None:
         emit("tool_finished", tool=tc.name, error=f"unknown tool '{tc.name}'", denied=False)
@@ -492,6 +662,22 @@ def _run_one(engagement, run, tc, registry, sandbox, graph, audit, db, result, c
         intensity = Intensity.light  # ignore a bad intensity rather than fail the step
 
     stage = stage_of(tool.name)
+
+    # Repeat-call guard: the exact same (tool, target, intensity) triple returns the exact same
+    # result, so re-running it teaches the model nothing new. On a wide range that pattern alone can
+    # exhaust the tool-call budget before the run ever gets past the seed target. Denied *before* the
+    # sandbox is touched — no tool_call/tool_started, no execute_tool_step — but the caller still
+    # increments result.tool_calls_used for this iteration exactly as it would for any other call, so
+    # this cannot be used to dodge the budget, only to avoid wasted work under it.
+    call_key = (tool.name, target.lower(), intensity.value)
+    if seen_calls is not None and call_key in seen_calls:
+        summary = (f"already ran {tool.name} on {target} this run — result unchanged; choose a "
+                   "different action or stop")
+        emit("tool_finished", tool=tool.name, target=target, stage=stage, summary=summary, repeat=True)
+        return summary
+    if seen_calls is not None:
+        seen_calls.add(call_key)
+
     emit("tool_call", tool=tool.name, target=target, intensity=intensity.value, stage=stage)
     emit("tool_started", tool=tool.name, target=target, stage=stage)
 
@@ -507,6 +693,17 @@ def _run_one(engagement, run, tc, registry, sandbox, graph, audit, db, result, c
     emit("tool_finished", tool=tool.name, target=target, stage=stage, summary=summary,
          denied=not step.allowed, error=step.error,
          services=len(step.services), findings=len(step.findings))
+    if _no_output(step):
+        # Round 6 — WS B: the model might still summarize its way around a silent-zero result (or
+        # the operator might not be reading every tool_finished summary closely), so this needs its
+        # own loud, persistent signal independent of the transcript — the same reasoning B3 used for
+        # the scope-guard-disabled warning. `warning` is the event kind the chat UI renders as a
+        # banner rather than a transient bubble, which is exactly the visibility a tool that exited
+        # having scanned nothing needs.
+        emit("warning", scope="tool_output", tool=tool.name, target=target, stage=stage,
+             exit_code=getattr(step, "exit_code", None),
+             message=f"{tool.name} produced no output against {target} "
+                     f"(exit={getattr(step, 'exit_code', None)}) — this is NOT a clean result")
 
     # Memory-out: surface each observed change so the chat shows a live "network changes" feed.
     delta = getattr(step, "memory_delta", None)

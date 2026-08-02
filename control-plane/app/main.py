@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from .audit import AuditEvent, EventType, MemoryAuditSink, PostgresAuditSink
 from .auth import Authenticator, Principal, has_role
 from .config import assert_secure_authentication, is_development, settings
-from .events import RunEventStore, RunInbox
+from .events import TERMINAL_STATUSES, RunCancels, RunEventStore, RunInbox
 from .memory import NetworkMemory
 from .correlation import correlate
 from .db.database import Database
@@ -47,12 +47,15 @@ from .store import Store
 from .uploads import UploadError, save_and_extract
 
 # Agent runtime lives in a sibling package; the single-host image installs both.
-from runtime.agent import DEFAULT_MISSION, ORCHESTRATOR_MISSION, run_agent
+from runtime.agent import run_agent
 from runtime.llm.config import get_provider
 from runtime.orchestrator import run_scan
+from runtime.personas import load_personas
+from runtime.personas import resolve as resolve_persona
+from runtime.pipeline import stage_of
 from runtime.registry import ToolRegistry
 from runtime.sandbox import DockerSandbox
-from runtime.subagents import SPECIALISTS, specialist_mission, specialist_registry
+from runtime.subagents import specialist_mission, specialist_registry
 from runtime.toolset import all_tools, select_tools
 
 # Phase 7: authentication + per-tenant rate limiting. With no EYE_API_KEYS set, auth is open dev mode.
@@ -137,7 +140,11 @@ _CORS_ORIGINS = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    # PATCH is here for `/engagements/{id}/scope-guard`. The list is deliberately enumerated rather
+    # than "*": a method missing from it fails the browser's *preflight* with a 400, and fetch()
+    # reports that as a bare `TypeError: Failed to fetch` with no mention of CORS — so a new verb
+    # that works perfectly under curl looks like a client bug. Add the verb here when adding a route.
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["X-API-Key", "Content-Type"],
 )
 
@@ -160,6 +167,10 @@ run_events = RunEventStore(db)
 # Reverse channel for the interactive chat: carries an operator's reply from POST /runs/{id}/reply
 # into the run's background thread, which blocks inside the agent's ask_user tool.
 run_inbox = RunInbox()
+# Abort signalling (round 5 — WS A): the operator's cancellation request from POST /runs/{id}/abort,
+# polled by run_agent's loop. Modeled on run_inbox immediately above, including its retirement
+# discipline (see events.py).
+run_cancels = RunCancels()
 
 # Cross-run network memory (the "brain"): the durable, differential map fed back to the agent and
 # surfaced to the UI. Backed by Neo4j (topology) + Postgres (audit-grade diff log). It can never
@@ -176,6 +187,7 @@ memory = NetworkMemory(graph, db)
 # re-derives on demand. Hooks are best-effort; `RunEventStore` swallows their exceptions so a
 # failure here can never disturb the event stream.
 run_events.on_retire(run_inbox.retire)
+run_events.on_retire(run_cancels.retire)
 run_events.on_retire(memory.retire_run)
 # Two-arg pop: a run that was never cached here (or was already evicted) is the normal case, not an
 # error — one-arg dict.pop would raise KeyError on every such retirement.
@@ -231,6 +243,18 @@ _RUN_POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_RUNS, thread_name_pref
 # controlled here rather than by letting work pile up invisibly behind the workers.
 _RUN_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_RUNS)
 _RUN_RETRY_AFTER = os.getenv("EYE_RUN_RETRY_AFTER", "30")
+
+# Round 5 — WS A (abort): the sandbox instance an in-flight agent-mode run is currently using, so
+# POST /runs/{id}/abort can kill whatever container is blocked inside `container.wait()` right now
+# instead of only setting a flag the run thread won't look at until it's done blocking. Populated at
+# launch, popped in `_launch`'s own `finally` — by the time that runs there is nothing left for an
+# abort to kill, so this doesn't need to wait for the (much slower) event-retention grace period the
+# way run_inbox/run_cancels do. Both modes are registered: a scan is a single tool step with no loop
+# to poll, so killing the container *is* the abort there, and `run_scan` consults the cancel flag
+# afterwards purely to report `aborted` instead of the `failed` a killed container would otherwise
+# look like. Registering only agent mode would leave `/runs/{id}/abort` answering 200 for a scan it
+# had no way to stop — a lie the caller cannot detect.
+_run_sandboxes: dict[str, DockerSandbox] = {}
 
 # SSE safety cap. The old hard-coded 30 minutes silently closed the stream mid-run for orchestrator
 # profiles (several specialist passes plus a 600 s ask_user block). 0 disables the cap.
@@ -434,6 +458,22 @@ def _run_payload(source) -> dict:
     }
 
 
+def _current_run_status(run_id: str) -> str | None:
+    """The run's current status string, or None if the run is unknown. Mirrors `get_run`'s two-store
+    lookup (durable row first, in-memory fallback second) so an abort request sees exactly the status
+    the rest of the API would report for the same run."""
+    try:
+        row = runs.get(run_id)
+        if row:
+            return _run_payload(row).get("status")
+    except Exception:
+        pass
+    run = store.runs.get(run_id)
+    if run is None:
+        return None
+    return _run_payload(run).get("status")
+
+
 def _engagement_id_for_run(run_id: str) -> str | None:
     run = store.runs.get(run_id)
     if run is not None:
@@ -457,6 +497,15 @@ class CreateEngagement(BaseModel):
     # Intrusive capabilities, off by default. Setting these is an explicit authorization decision.
     allow_exploit: bool = False
     allow_credential_attacks: bool = False
+    # B3: the scope guard's target-allowlist match, on by default. Flipping it off later goes through
+    # PATCH /engagements/{engagement_id}/scope-guard (admin-only to disable, re-signs, audits) rather
+    # than this endpoint, but an operator may still choose to launch an engagement with it already
+    # off — same admin-only rule applies there too (see create_engagement below).
+    scope_guard_enabled: bool = True
+
+
+class ScopeGuardUpdate(BaseModel):
+    enabled: bool
 
 
 class CreateRun(BaseModel):
@@ -465,19 +514,23 @@ class CreateRun(BaseModel):
     intensity: Intensity = Intensity.light
     # "scan" runs one tool deterministically; "agent" lets the LLM plan multi-step recon.
     mode: str = "scan"
-    # Agent-mode free-text objective from the chat UI. Combined with DEFAULT_MISSION as guidance; it
-    # is NOT authorization — every tool call is still checked against the signed scope.
+    # Agent-mode free-text objective from the chat UI. Combined with the resolved persona's mission
+    # as guidance; it is NOT authorization — every tool call is still checked against the signed scope.
     objective: str | None = None
     # Optional auth profile for authenticated DAST (e.g. {"header_name": "Authorization",
     # "value_ref": "app-token"}); value_ref resolves from secrets so credentials aren't stored here.
     auth: dict | None = None
     # Agent-mode "tool library": the subset of tools the planner may use this run. None/empty = all.
     # A capability restriction only — an unchecked tool is never offered, so it cannot run; the scope
-    # guard and offensive-flag gate still apply on top of whatever remains.
+    # guard and offensive-flag gate still apply on top of whatever remains. When a persona profile is
+    # also given (below) and isn't the orchestrator, this list is additionally checked against that
+    # persona's own tool list — deny-by-default, 400 naming any tool the persona isn't allowed.
     enabled_tools: list[str] | None = None
-    # Agent-mode profile (who drives the assessment). None/"full" = an orchestrator that delegates to
-    # specialist sub-agents on demand; a specialist name (recon/dast/sast/intel/exploit/credentials)
-    # runs that single focused specialist directly; "flat" = the legacy single generalist agent.
+    # Agent-mode profile (who drives the assessment): a persona id or legacy alias, resolved via
+    # runtime.personas.resolve. None/"overseer"/"full" = the orchestrator persona, which delegates to
+    # specialist personas on demand; a specialist id/alias (scout/recon, viper/dast, warden/sast,
+    # oracle/intel, reaper/exploit, ghost/credentials) runs that one persona directly; "jack"/"flat"
+    # is the legacy single generalist agent with the full toolkit. Unknown profile -> 400.
     profile: str | None = None
 
 
@@ -495,7 +548,9 @@ def health():
 @app.get("/tools")
 def list_tools():
     """The tool library the UI renders as checkboxes: every registered tool with the metadata needed
-    to group and label it. `requires_flag` marks offensive tools that also need a signed scope flag."""
+    to group and label it. `requires_flag` marks offensive tools that also need a signed scope flag.
+    `stage` is the pipeline-rail phase the tool belongs to (presentation only — see runtime.pipeline);
+    it is independent of which persona(s) actually offer the tool."""
     return [
         {
             "name": t.name,
@@ -503,6 +558,7 @@ def list_tools():
             "surface": getattr(t, "surface", "network"),
             "requires_flag": getattr(t, "requires_flag", None),
             "mcp": getattr(t, "mcp", None) is not None,
+            "stage": stage_of(t.name),
         }
         for t in TOOLS.values()
     ]
@@ -510,20 +566,32 @@ def list_tools():
 
 @app.get("/profiles")
 def list_profiles():
-    """Agent profiles the UI offers in the launcher: the orchestrator ("full"), one per specialist
-    sub-agent, and the legacy generalist ("flat"). `gated_flag` marks specialists that also need a
-    signed scope flag (offered but inert without it)."""
-    specialists = [
-        {"name": s.kind, "stage": s.stage, "description": s.summary, "gated_flag": s.gated_flag}
-        for s in SPECIALISTS.values()
-    ]
+    """Agent profiles the UI offers in the launcher: named personalities loaded from
+    runtime/agents.toml (EYE_AGENTS_CONFIG override) — the orchestrator (Overseer) first, then the
+    specialist personas, then the legacy generalist (Jack) last. `tools` is each persona's *exact*
+    tool list (empty for the orchestrator, which delegates instead of running tools itself); it is
+    capability metadata for the UI, never authorization — `gated_flag` marks a persona whose tools
+    also need a signed scope flag before they can actually run (offered, but inert without it)."""
+    roster = load_personas().values()
+    ordered = sorted(roster, key=lambda p: (0 if p.orchestrator else 2 if p.generalist else 1))
     return {
         "profiles": [
-            {"name": "full", "stage": None, "gated_flag": None,
-             "description": "Orchestrator — delegates to specialist sub-agents on demand."},
-            *specialists,
-            {"name": "flat", "stage": None, "gated_flag": None,
-             "description": "Single generalist agent (legacy)."},
+            {
+                "id": p.id,
+                "label": p.label,
+                "name": p.id,  # legacy alias == id, kept for older UI builds
+                "glyph": p.glyph,
+                "accent": p.accent,
+                "tagline": p.tagline,
+                "description": p.tagline,  # == tagline, kept for older UI builds
+                "stage": p.stage,
+                "gated_flag": p.gated_flag,
+                "orchestrator": p.orchestrator,
+                "generalist": p.generalist,
+                "tools": list(p.tools),
+                "aliases": list(p.aliases),
+            }
+            for p in ordered
         ]
     }
 
@@ -541,6 +609,12 @@ def cve_lookup(product: str, version: str | None = None):
 
 @app.post("/engagements")
 def create_engagement(body: CreateEngagement, principal: Principal = Depends(require("operator"))):
+    # B3: launching an engagement with the scope guard already off is the same privileged decision as
+    # flipping it off later via PATCH /engagements/{id}/scope-guard — it must not be a way for an
+    # operator key to get the admin-only bypass just by asking for it at creation time instead.
+    if not body.scope_guard_enabled and not has_role(principal, "admin"):
+        raise HTTPException(403, "creating an engagement with the scope guard disabled requires role >= admin")
+
     now = datetime.now(timezone.utc)
     scope = Scope(
         allowed_cidrs=body.allowed_cidrs,
@@ -551,6 +625,7 @@ def create_engagement(body: CreateEngagement, principal: Principal = Depends(req
         max_intensity=body.max_intensity,
         allow_exploit=body.allow_exploit,
         allow_credential_attacks=body.allow_credential_attacks,
+        scope_guard_enabled=body.scope_guard_enabled,
     )
     scope.signature = sign_scope(scope)  # bind the authorization boundary at creation time
     engagement = Engagement(id=str(uuid.uuid4()), name=body.name, scope=scope)
@@ -559,6 +634,17 @@ def create_engagement(body: CreateEngagement, principal: Principal = Depends(req
         graph.upsert_engagement(engagement.id, engagement.name)
     except Exception:
         pass
+    if not scope.scope_guard_enabled:
+        # Always audited as an explicit bypass (B3), not just on later PATCH flips — a replay must
+        # never show an engagement whose guard was off from the start without a record of that.
+        try:
+            audit.append(AuditEvent(
+                engagement_id=engagement.id, run_id="", type=EventType.scope_decision,
+                tool="scope-guard", target=engagement.id, allowed=True,
+                detail=f"engagement created with scope guard DISABLED by {principal.tenant_id}",
+            ))
+        except Exception:
+            pass
     return engagement
 
 
@@ -596,6 +682,50 @@ def get_engagement(engagement_id: str, principal: Principal = Depends(get_princi
     eng = _load_engagement(engagement_id, _read_tenant(principal))
     if not eng:
         raise HTTPException(404, "engagement not found")
+    return eng
+
+
+@app.patch("/engagements/{engagement_id}/scope-guard")
+def update_scope_guard(
+    engagement_id: str,
+    body: ScopeGuardUpdate,
+    principal: Principal = Depends(require("operator")),
+):
+    """B3: the operator-facing scope-guard on/off toggle.
+
+    Turning the guard OFF is a privileged, signed, and audited bypass of the target-allowlist match
+    inside `scope.authorize()` — with it off, every target is authorized for this engagement, but the
+    signature, time window, and intensity ceiling stay enforced, and it never loosens
+    `execute_tool_step`'s separate `requires_flag` gate on exploitation/credential tools (see scope.py
+    and orchestrator.py). Because that is a strictly more dangerous state than the default, disabling
+    it requires `admin` — re-enabling only needs `operator`, matching the asymmetric risk. Every flip
+    re-signs the scope: `scope_guard_enabled` only enters `Scope.canonical()` when False, so turning
+    it back on restores the exact signature a guard-on scope has always had, and turning it off
+    invalidates whatever signature existed until this re-sign. The change is written to the audit log
+    unconditionally so a replay can never mistake an active bypass window for a normal allow.
+    """
+    tenant = _read_tenant(principal)
+    eng = _load_engagement(engagement_id, tenant)
+    if not eng:
+        raise HTTPException(404, "engagement not found")
+    if not body.enabled and not has_role(principal, "admin"):
+        raise HTTPException(403, "disabling the scope guard requires role >= admin")
+
+    owner_tenant = _tenant_for_engagement(engagement_id, principal)
+    eng.scope.scope_guard_enabled = body.enabled
+    eng.scope.signature = sign_scope(eng.scope)  # re-sign: the flag is part of canonical() when off
+    _save_engagement(eng, owner_tenant)
+
+    try:
+        audit.append(AuditEvent(
+            engagement_id=engagement_id, run_id="", type=EventType.scope_decision,
+            tool="scope-guard", target=engagement_id, allowed=body.enabled,
+            detail=(f"scope guard {'re-enabled' if body.enabled else 'DISABLED'} by "
+                   f"{principal.tenant_id} (role={principal.role})"),
+        ))
+    except Exception:
+        pass
+
     return eng
 
 
@@ -722,22 +852,37 @@ def create_run(engagement_id: str, body: CreateRun,
         # problem fails the run (not the API request); the scope guard still runs first in either path.
         context = {"auth": body.auth} if body.auth else None
 
-        # Agent profile: who drives the assessment. "full" (default) = an orchestrator delegating to
-        # specialist sub-agents; a specialist name runs that single focused specialist directly over
-        # the selected tool pool; "flat" = the legacy single generalist agent. Presentation/capability
-        # choice only — the scope guard and offensive-flag gate are unchanged for every path.
-        profile = (body.profile or "full").strip().lower()
-        if body.mode == "agent" and profile not in ({"full", "flat"} | set(SPECIALISTS)):
+        # Agent profile: who drives the assessment. Resolved through personas.resolve, which matches
+        # a persona id or any legacy alias ("full"->overseer, "flat"->jack, "recon"->scout, ...) so
+        # older clients keep working unchanged. Presentation/capability choice only — the scope guard
+        # and offensive-flag gate are unchanged for every path.
+        persona = resolve_persona(body.profile) if body.profile else resolve_persona("overseer")
+        if body.mode == "agent" and persona is None:
             raise HTTPException(400, f"unknown profile: {body.profile}")
-        if profile in SPECIALISTS:
+
+        # enabled_tools is a capability restriction on top of the persona's own toolkit, never a way
+        # to widen it: a non-orchestrator persona's selection must be a subset of its `tools`, or the
+        # request is rejected (deny-by-default) instead of silently dropping/ignoring the extras.
+        if body.mode == "agent" and persona is not None and not persona.orchestrator and body.enabled_tools:
+            disallowed = sorted(set(body.enabled_tools) - set(persona.tools))
+            if disallowed:
+                raise HTTPException(
+                    400, f"tool(s) not permitted for profile '{persona.id}': {disallowed}")
+
+        # A garbage profile string only matters in agent mode (checked above); scan mode never reads
+        # these variables, so fall back to the orchestrator's shape rather than leaving them unbound.
+        if persona is None:
+            persona = resolve_persona("overseer")
+
+        if persona.orchestrator:
             base_mission, agent_registry, specialist_pool = (
-                specialist_mission(profile), specialist_registry(profile, planner_tools), None)
-        elif profile == "flat":
+                persona.mission, ToolRegistry([]), planner_tools)
+        elif persona.generalist:
             base_mission, agent_registry, specialist_pool = (
-                DEFAULT_MISSION, ToolRegistry(planner_tools), None)
-        else:  # "full" orchestrator: registry unused (specs come from the specialist sub-agents)
+                persona.mission, ToolRegistry(planner_tools), None)
+        else:
             base_mission, agent_registry, specialist_pool = (
-                ORCHESTRATOR_MISSION, ToolRegistry([]), planner_tools)
+                specialist_mission(persona.id), specialist_registry(persona.id, planner_tools), None)
 
         # Combine the operator's objective with the chosen mission. Guidance only, never authorization.
         mission = base_mission
@@ -745,16 +890,17 @@ def create_run(engagement_id: str, body: CreateRun,
             mission = f"{base_mission}\n\nEngagement objective: {body.objective.strip()}"
 
         def _launch():
+            sandbox = DockerSandbox()
+            _run_sandboxes[run.id] = sandbox
             try:
-                sandbox = DockerSandbox()
                 if body.mode == "agent":
                     run_agent(eng, run, get_provider("planner"), agent_registry,
                               sandbox, graph, audit, run_sink, mission=mission, context=context,
                               events=run_events, memory=memory, inbox=run_inbox,
-                              specialist_pool=specialist_pool)
+                              specialist_pool=specialist_pool, persona=persona, cancels=run_cancels)
                 else:
                     run_scan(eng, run, tool, body.intensity, sandbox, graph, audit, run_sink,
-                             context, memory=memory)
+                             context, memory=memory, cancels=run_cancels)
             except Exception as exc:
                 # Any setup failure (e.g. Docker unavailable, provider unreachable) must mark the run
                 # failed AND be visible — never leave it stuck in "running" with silent logs.
@@ -772,6 +918,7 @@ def create_run(engagement_id: str, body: CreateRun,
                 except Exception:
                     pass
             finally:
+                _run_sandboxes.pop(run.id, None)
                 _RUN_SLOTS.release()  # free the capacity slot for the next caller
 
         _RUN_POOL.submit(_launch)
@@ -838,6 +985,56 @@ def run_reply(run_id: str, body: RunReply, principal: Principal = Depends(requir
     except Exception:
         pass
     return {"ok": True}
+
+
+@app.post("/runs/{run_id}/abort")
+def abort_run(run_id: str, principal: Principal = Depends(require("operator"))):
+    """Request cancellation of an in-flight run (round 5 — WS A).
+
+    Two independent mechanisms, because a cooperative flag alone is powerless while the run thread is
+    blocked inside `container.wait()` for up to the tool timeout:
+
+    1. `run_cancels.request` sets the flag `run_agent`'s loop polls at every point it can honour an
+       abort promptly (top of its provider-call loop, before each tool call in a batch, and right
+       after `ask_user` returns — see agent.py). A run parked in `ask_user` is also woken here
+       (`run_inbox.wake`) so it doesn't sit blocked until its ask timeout just to notice the flag.
+    2. `sandbox.abort()` kills whichever container this run currently has in flight, so a `run_one`
+       call already inside the sandbox returns in seconds instead of minutes. For a scan-mode run —
+       one tool step, no loop — this is the entire abort; `run_scan` then reads the same flag only to
+       report `aborted` rather than the `failed` a killed container would otherwise resemble.
+
+    Neither mechanism reaches back in time: a run that finishes on its own between this call and the
+    next moment it would have checked simply completes normally, and the 409 below is what tells a
+    caller "too late" rather than the abort silently doing nothing.
+
+    S2: same authorization tier as POST /runs/{id}/reply — this is the other write path that reaches
+    into a live run — so it is operator-gated and audited under the same event shape.
+    """
+    status = _current_run_status(run_id)
+    if status is None:
+        raise HTTPException(404, "run not found")
+    if status in TERMINAL_STATUSES:
+        raise HTTPException(409, "run already finished")
+
+    run_cancels.request(run_id)
+    run_inbox.wake(run_id)  # in case the run is currently parked in ask_user
+    sandbox = _run_sandboxes.get(run_id)
+    if sandbox is not None:
+        try:
+            sandbox.abort()
+        except Exception:
+            pass  # best-effort: the cooperative check above still stops the run either way
+
+    try:
+        audit.append(AuditEvent(
+            engagement_id=_engagement_id_for_run(run_id) or "unknown",
+            run_id=run_id, type=EventType.scope_decision, tool="abort",
+            target="operator_abort", allowed=True,
+            detail=f"operator {principal.tenant_id}/{principal.role} requested abort of run {run_id}",
+        ))
+    except Exception:
+        pass
+    return {"ok": True, "status": "aborting"}
 
 
 @app.get("/runs/{run_id}/events")

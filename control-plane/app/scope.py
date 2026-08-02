@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .config import settings
-from .matching import host_in_domains, ip_in_cidrs
+from .matching import host_in_domains, ip_in_cidrs, network_in_cidrs
 from .models import Intensity, Scope, is_ip
 
 # Intensity ordering, used to enforce the engagement's ceiling.
@@ -74,6 +75,41 @@ def _target_host(target: str) -> str:
     return t
 
 
+def _target_network(target: str) -> tuple[bool, "ipaddress.IPv4Network | ipaddress.IPv6Network | None"]:
+    """Detect whether `target` denotes a whole network ("address/prefixlen"), as opposed to a bare
+    host possibly followed by a path.
+
+    Returns `(is_network_shaped, network_or_None)`. Strips a URL scheme and userinfo the same way
+    `_target_host` does, but — unlike `_target_host` — does NOT treat the first "/" it finds as a
+    path separator, because a CIDR is legitimately written as `address/prefixlen` and that "/" *is*
+    the prefix, not a path. Splitting there is the historical bug B1 fixes: it silently truncated the
+    target down to the bare network address (`"10.0.0.0/8"` -> `"10.0.0.0"`), which then got checked
+    -- and could be authorized -- as a single host, while the tool was still handed the full,
+    unauthorized range.
+
+    `is_network_shaped` is True whenever the text after the first "/" is purely digits, i.e. it looks
+    like an attempted prefix length (not a path or query, which would contain other characters). The
+    caller must treat "network-shaped but failed to parse" (`is_network_shaped=True`,
+    `network=None` — e.g. an out-of-range prefix like "/99") as a malformed network and deny outright,
+    rather than falling back to host matching, which would just repeat the same truncation bug on a
+    different malformed input.
+    """
+    t = target.strip()
+    if "://" in t:
+        t = t.split("://", 1)[1]
+    if "@" in t:
+        t = t.rsplit("@", 1)[1]
+    if "/" not in t:
+        return False, None
+    _, _, tail = t.partition("/")
+    if not tail.isdigit():
+        return False, None
+    try:
+        return True, ipaddress.ip_network(t, strict=False)
+    except ValueError:
+        return True, None
+
+
 def _artifact_in_scope(target: str, artifacts: list[str]) -> bool:
     # Static-analysis targets are paths/repo URLs; allow if under an authorized prefix.
     return any(target == a or target.startswith(a.rstrip("/") + "/") or target == a.rstrip("/")
@@ -90,7 +126,12 @@ def authorize(
     """Return whether `target` at `intensity` is permitted by `scope`. Deny by default.
 
     `surface` selects the allowlist: network tools check CIDRs/domains; artifact (SAST) tools check
-    the authorized source paths/repos. Signature, time window, and intensity apply to both.
+    the authorized source paths/repos. Signature, time window, and intensity apply to both — and
+    still do even when the scope guard's target match is disabled below (B3): that flag only ever
+    widens *which target* is authorized, never *whether an unsigned/expired/over-intensity request*
+    is. It also never touches `execute_tool_step`'s separate `requires_flag` check — exploitation and
+    credential-attack tools stay gated behind their own signed scope flags no matter what this
+    returns; see orchestrator.py.
     """
     now = now or datetime.now(timezone.utc)
 
@@ -107,6 +148,15 @@ def authorize(
     if not target:
         return Decision(False, "empty target")
 
+    if not scope.scope_guard_enabled:
+        # B3: an explicit, signed, audited operator bypass (PATCH /engagements/{id}/scope-guard,
+        # admin-only to turn off) — not a silent kill switch. Everything above this line (signature,
+        # time window, intensity ceiling) still applies unconditionally; this only skips the
+        # target-allowlist match that follows, because with the guard off every target is, by design,
+        # authorized for this engagement. The caller (orchestrator.execute_tool_step) audits this
+        # decision's reason verbatim, so a replay can never mistake this for an ordinary allow.
+        return Decision(True, "scope guard disabled for this engagement")
+
     if surface == "knowledge":
         # Knowledge lookups (CVE DB, reputation/threat-intel) don't touch an in-scope target, so
         # there's no allowlist to match; a valid, in-window signed scope is sufficient authorization.
@@ -116,6 +166,19 @@ def authorize(
         if _artifact_in_scope(target, scope.allowed_artifacts):
             return Decision(True, "artifact in allowed paths")
         return Decision(False, "artifact not in any allowed path")
+
+    # B1: a target with an explicit "/prefixlen" denotes a whole network, not a single host — take
+    # that branch *before* the host-oriented parsing below, which would otherwise treat the "/" as a
+    # path separator and truncate "10.0.0.0/8" down to the bare address "10.0.0.0" (see
+    # `_target_network`'s docstring for the bug that produced). A network is only authorized when it
+    # is *entirely* contained in an allowed CIDR — checking only its network address, as the old code
+    # did, authorized the address while leaving the whole range to reach the tool unchecked. A `/32`
+    # (or IPv6 `/128`) target reduces to exactly the bare-IP check below, by construction.
+    is_network, network = _target_network(target)
+    if is_network:
+        if network is not None and network_in_cidrs(str(network), scope.allowed_cidrs):
+            return Decision(True, "network inside allowed cidr")
+        return Decision(False, "network not fully inside any allowed cidr")
 
     # Peel a URL scheme / port / path off the target so an in-scope host still authorizes when a tool
     # addresses it as `http://host/...` or `host:port`. The host is the authorization boundary.

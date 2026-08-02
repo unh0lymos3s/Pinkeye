@@ -1,16 +1,22 @@
-"""Parsers for static-analysis tools: semgrep, gitleaks, trivy. All emit JSON.
+"""Parser for semgrep, the one SAST tool whose sandbox path never needed fixing (it runs through MCP,
+not the Docker sandbox — see ../tools/sast.py). All emit JSON.
 
 SAST findings target a source location (file:line) rather than a host, and carry CWE where the tool
 provides it so they can later be correlated with runtime (DAST) findings on the same weakness class.
+
+gitleaks and trivy used to be parsed here too. Round 6 split them into their own `gitleaks.py`/
+`trivy.py` modules — each tool needed its own independent sandbox fix and its own real-output
+verification, so keeping them in one file no longer matched how the code changes together. They are
+re-exported below unchanged so existing callers/imports of `normalize.sast` keep working.
 """
 from __future__ import annotations
 
 import json
 
-from app.models import Severity
-
 from ..tools.base import ToolOutput
 from .common import make_finding, to_severity
+from .gitleaks import parse_gitleaks_json  # noqa: F401 - re-exported for back-compat callers
+from .trivy import parse_trivy_json  # noqa: F401 - re-exported for back-compat callers
 
 
 def _loc(path: str, start_line) -> str:
@@ -35,47 +41,6 @@ def parse_semgrep_json(raw: bytes | str, *, engagement_id: str, run_id: str, tar
                 evidence=(extra.get("message") or "")[:300],
             )
         )
-    return out
-
-
-def parse_gitleaks_json(raw: bytes | str, *, engagement_id: str, run_id: str, target: str) -> ToolOutput:
-    data = _load(raw)
-    # gitleaks emits a top-level JSON array of leaks.
-    leaks = data if isinstance(data, list) else data.get("findings", [])
-    out = ToolOutput()
-    for leak in leaks:
-        out.findings.append(
-            make_finding(
-                engagement_id=engagement_id, run_id=run_id,
-                title=f"Secret leaked: {leak.get('RuleID', 'unknown rule')}",
-                category="sast:secret",
-                target=_loc(leak.get("File", target), leak.get("StartLine")),
-                severity=Severity.high,  # a committed secret is high by default
-                confidence=0.85, source_tool="gitleaks", cwe="CWE-798",
-                evidence=(leak.get("Description") or leak.get("Match", ""))[:200],
-            )
-        )
-    return out
-
-
-def parse_trivy_json(raw: bytes | str, *, engagement_id: str, run_id: str, target: str) -> ToolOutput:
-    data = _load(raw)
-    out = ToolOutput()
-    for res in data.get("Results", []):
-        where = res.get("Target", target)
-        for v in res.get("Vulnerabilities", []) or []:
-            out.findings.append(
-                make_finding(
-                    engagement_id=engagement_id, run_id=run_id,
-                    title=f"{v.get('PkgName', '')} {v.get('VulnerabilityID', '')}".strip(),
-                    category="sast:dependency",
-                    target=f"{where}:{v.get('PkgName', '')}",
-                    severity=to_severity(v.get("Severity")),
-                    confidence=0.8, source_tool="trivy",
-                    cve=(v.get("VulnerabilityID") if str(v.get("VulnerabilityID", "")).startswith("CVE") else None),
-                    evidence=(v.get("Title") or v.get("Description", ""))[:200],
-                )
-            )
     return out
 
 

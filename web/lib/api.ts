@@ -6,7 +6,28 @@ export type GraphNode = { id: string; label: string; props: Record<string, unkno
 export type GraphEdge = { source: string; target: string; type: string };
 export type Graph = { nodes: GraphNode[]; edges: GraphEdge[] };
 
-export type Engagement = { id: string; name: string };
+// `scope` is optional and every field inside it is optional: an engagement created before the
+// scope-guard toggle shipped (or fetched from an older control-plane build) simply won't have it,
+// and callers must treat that as "guard on" (the documented default) rather than crash. Widened
+// (chat-UI contract §2, U3) so the agent workspace's control panel can render the operator's actual
+// proof of authorization — real CIDRs/domains/artifacts/intensity/window/flags — instead of just the
+// guard flag; every field stays optional so an older API response still type-checks unchanged.
+export type Engagement = {
+  id: string;
+  name: string;
+  scope?: {
+    allowed_cidrs?: string[];
+    allowed_domains?: string[];
+    allowed_artifacts?: string[];
+    max_intensity?: string;
+    not_before?: string;
+    not_after?: string;
+    allow_exploit?: boolean;
+    allow_credential_attacks?: boolean;
+    scope_guard_enabled?: boolean;
+    [k: string]: unknown;
+  };
+};
 
 export type Metrics = {
   hosts: number;
@@ -121,7 +142,14 @@ async function json<T>(res: Response): Promise<T> {
   return res.json();
 }
 
-export function createEngagement(body: { name: string; allowed_cidrs: string[]; allowed_domains: string[] }) {
+export function createEngagement(body: {
+  name: string;
+  allowed_cidrs: string[];
+  allowed_domains: string[];
+  // Defaults to true server-side when omitted, so callers written before this flag existed keep
+  // creating fully-guarded engagements exactly as they always did.
+  scope_guard_enabled?: boolean;
+}) {
   return request(`/engagements`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -133,6 +161,17 @@ export function listEngagements() {
   return request(`/engagements`, { cache: "no-store" }).then(json<Engagement[]>);
 }
 
+// Flip the scope-guard bypass for an existing engagement. Disabling it requires an admin key —
+// an operator key gets a 403, surfaced via the shared ApiAuthError path (see request() above) —
+// and the control plane re-signs the scope and audits the change on every flip.
+export function updateScopeGuard(engagementId: string, enabled: boolean) {
+  return request(`/engagements/${engagementId}/scope-guard`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  }).then(json<Engagement>);
+}
+
 export type RunOptions = {
   target: string;
   tool?: string;
@@ -141,7 +180,8 @@ export type RunOptions = {
   objective?: string;
   // Agent-mode tool library: the subset of tools the planner may use. Omit/empty = all tools.
   enabledTools?: string[];
-  // Agent-mode profile: "full" (orchestrator) | a specialist name | "flat". Omit = "full".
+  // Agent-mode profile: a persona id (e.g. "overseer", "scout") or one of its legacy aliases
+  // ("full", "recon", "dast", "flat", …). Omit = the backend's default (the orchestrator).
   profile?: string;
 };
 
@@ -207,6 +247,9 @@ export type Tool = {
   surface: string; // network | artifact | knowledge
   requires_flag: string | null; // offensive tools also need a signed-scope flag
   mcp: boolean;
+  // Pipeline stage this tool belongs to (agent-runtime's stage_of()). Optional: an older
+  // control-plane build won't send it, and callers fall back to their own name -> stage table.
+  stage?: string | null;
 };
 
 export function listTools() {
@@ -214,16 +257,59 @@ export function listTools() {
 }
 
 // ---- agent profiles (who drives the assessment) ----
-
+//
+// A "profile" is a persona: a named personality (Overseer, Scout, Viper, …) with its own glyph,
+// accent color, tagline and an explicit list of tools it may reach. This is capability metadata
+// for the UI only — it lets the operator see who they're talking to and what that persona can
+// touch; the control plane still enforces `enabled_tools ⊆ persona.tools` server-side regardless
+// of what the UI shows or hides.
 export type Profile = {
-  name: string; // "full" | specialist kind | "flat"
-  stage: string | null; // pipeline stage a specialist owns, or null
-  description: string;
-  gated_flag: string | null; // specialists that also need a signed-scope flag
+  id: string; // canonical persona id, e.g. "scout"
+  label: string; // display name, e.g. "Scout"
+  name: string; // legacy alias === id, kept so any old caller keyed on `name` still works
+  glyph: string; // single-character/emoji glyph, e.g. "🛰"
+  accent: string; // persona accent color (hex) — used the same way `Kpi`'s `accent` prop already
+  // is: a small colored marker on an otherwise pink/white surface, never a full recolor.
+  tagline: string;
+  description: string; // == tagline, back-compat
+  stage: string | null; // pipeline stage this persona owns, or null for orchestrator/generalist
+  gated_flag: string | null; // "allow_exploit" | "allow_credential_attacks" | null
+  orchestrator: boolean;
+  generalist: boolean;
+  tools: string[]; // exact tool names this persona may use ([] for the orchestrator)
+  aliases: string[]; // legacy names that still resolve to this persona (e.g. "full", "dast")
 };
 
+// The backend for this ships in parallel with this UI, so `/profiles` may still return the old
+// bare shape ({name, stage, description, gated_flag}) or something in between while both land.
+// Normalize whatever comes back into a fully-populated Profile so every component can read every
+// field without optional-chaining, and so an old response renders exactly like it did before any
+// persona ever existed (one unnamed "profile" per legacy kind, all tools available, no grouping).
+function normalizeProfile(raw: any): Profile {
+  const id = String(raw?.id ?? raw?.name ?? "unknown");
+  const label = String(raw?.label ?? raw?.name ?? id);
+  const tagline = String(raw?.tagline ?? raw?.description ?? "");
+  return {
+    id,
+    label,
+    name: String(raw?.name ?? id),
+    glyph: raw?.glyph ?? "◆",
+    accent: raw?.accent ?? "#ffffff",
+    tagline,
+    description: String(raw?.description ?? tagline),
+    stage: raw?.stage ?? null,
+    gated_flag: raw?.gated_flag ?? null,
+    orchestrator: !!raw?.orchestrator,
+    generalist: !!raw?.generalist,
+    tools: Array.isArray(raw?.tools) ? raw.tools.map(String) : [],
+    aliases: Array.isArray(raw?.aliases) ? raw.aliases.map(String) : [],
+  };
+}
+
 export function listProfiles() {
-  return request(`/profiles`, { cache: "no-store" }).then(json<{ profiles: Profile[] }>);
+  return request(`/profiles`, { cache: "no-store" })
+    .then(json<{ profiles: any[] }>)
+    .then((r) => ({ profiles: (r.profiles || []).map(normalizeProfile) }));
 }
 
 // ---- live run events (chat interface) ----
@@ -239,6 +325,7 @@ export type RunEventKind =
   | "memory_delta"
   | "refusal"
   | "error"
+  | "warning" // e.g. scope guard disabled for this engagement — every target is authorized
   | "ask" // the agent is asking the operator (permission / recommendation / question)
   | "user_reply" // the operator's reply, echoed into the transcript
   | "subagent_started" // the orchestrator delegated to a specialist sub-agent
@@ -265,6 +352,25 @@ export function sendReply(runId: string, text: string) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ text }),
   }).then(json<{ ok: boolean }>);
+}
+
+// ---- abort a live run ----
+//
+// The frozen shape (control plane, Workstream A): 200 {"ok": true, "status": "aborting"} once the
+// abort has been recorded, 404 if the run id doesn't exist, 409 {"detail": "run already finished"}
+// if the run reached a terminal status between the operator's click and this request landing. The
+// run then emits its own `warning` + `status: "aborted"` events over the SSE stream already open —
+// this call only requests the abort, it doesn't itself flip any client-side state. 409 is not an
+// error worth surfacing as one: `json()` would throw on any non-ok response, so this handles it
+// explicitly and returns a discriminated result instead, following the same request()-then-json()
+// shape every other call in this file uses everywhere except this one expected non-2xx case.
+export type AbortRunResult = { ok: true; status: string } | { ok: false; reason: "already-finished" };
+
+export async function abortRun(runId: string): Promise<AbortRunResult> {
+  const res = await request(`/runs/${runId}/abort`, { method: "POST" });
+  if (res.status === 409) return { ok: false, reason: "already-finished" };
+  const body = await json<{ ok: boolean; status: string }>(res);
+  return { ok: true, status: body.status };
 }
 
 // ---- live run events: fetch-based SSE tail ----
