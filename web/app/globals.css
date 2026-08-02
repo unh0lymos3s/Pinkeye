@@ -730,6 +730,36 @@ code.k { font-family: var(--mono); background: var(--surface-3); padding: 1px 6p
   transition: filter 0.15s;
 }
 
+/* ---- Product page (/product): the same wordmark + orb, no controls ---- */
+/* Non-interactive twin of .eye-btn — identical footprint so the orb overflows it the same way, but
+   no cursor/hover affordance since nothing here is clickable. */
+.eye-mount {
+  position: relative;
+  overflow: visible;
+  width: 160px; height: 160px;
+  display: flex; align-items: center; justify-content: center;
+}
+/* The orb overflows its 160px mount by ~75px on each side; the launcher absorbs that with its wide
+   flex gap between neighbours, but stacked vertically the tagline would otherwise sit underneath
+   the orb's bottom overflow. */
+.product { gap: 20px; }
+.product .eye-mount { margin-bottom: 72px; }
+.product-tagline {
+  margin: 0;
+  text-align: center;
+  font-size: clamp(15px, 2.6vw, 20px);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.product-cta {
+  text-decoration: none;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  padding: 12px 22px;
+}
+
 /* ==========================================================================
    Agent workspace: chat-first layout (Workstream U2)
    /agent becomes rail + topbar + transcript + gear-triggered control panel,

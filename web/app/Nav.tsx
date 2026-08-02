@@ -61,6 +61,10 @@ export default function Nav() {
     setHasKey(false);
   }
 
+  // The product page (/product) is the public-facing page: no operator links, no API-key entry.
+  // Hooks above run unconditionally so this early return doesn't change hook order between routes.
+  if (path?.startsWith("/product")) return null;
+
   return (
     <nav className="nav-bubble">
       <div className="nav-bubble-panel">
