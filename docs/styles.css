@@ -1,0 +1,178 @@
+/* Pinkeye product page — standalone stylesheet.
+   The design tokens and the banner/orb rules are lifted verbatim from the operator UI
+   (web/app/globals.css) so this page is visually the same product; everything the operator UI
+   needs but this page doesn't (cards, nav, tables, forms) is left out. */
+
+:root {
+  /* Shocking pink is the page, not an accent on it — the whole surface is brand pink and
+     everything drawn on it is white. */
+  --bg: #ff2da0;
+  --brand: #ff2da0;
+  --border: rgba(255, 255, 255, 0.5);
+  --border-strong: rgba(255, 255, 255, 0.85);
+  --text: #ffffff;
+  --text-muted: rgba(255, 255, 255, 0.72);
+  --radius-sm: 12px;
+
+  /* Monospaced everywhere for the terminal aesthetic. IBM Plex Mono is self-hosted from fonts/
+     (no third-party request, and the page still renders offline); the stack falls back to the
+     platform's own monospace face if the woff2 fails to load. */
+  --font: "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/ibm-plex-mono-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/ibm-plex-mono-600.woff2") format("woff2");
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-weight: 500;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: rgba(255, 255, 255, 0.35); color: var(--brand); }
+
+/* The wordmark is decorative SVG, so the page's real <h1> is text-only and hidden visually —
+   screen readers and search results still get a proper heading. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- Page shell: everything stacked and centred in the viewport ---- */
+.launcher {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 32px 24px;
+}
+
+/* Bounds the wordmark's available width — the SVG's viewBox scaling fills this exactly at any
+   size, so the art never wraps or clips and scales cleanly with the window or browser zoom, with
+   no JS measuring needed. */
+.ascii-banner-wrap {
+  width: 100%;
+  max-width: min(92vw, 460px);
+  display: flex;
+  justify-content: center;
+}
+
+/* ASCII/block-art wordmark, drawn as vector rects rather than real box-drawing characters.
+   Rendering those characters as text is unreliable — browsers fall back to whatever installed font
+   has glyphs for them, and that font's cell metrics don't line up with the base monospace font,
+   desyncing the grid differently per OS/browser/zoom. Vector rects sidestep fonts entirely: each
+   line is its own full-width <svg>, stacked here as plain HTML flow so the wave animation below is
+   a normal CSS transform on an HTML box — not a transform nested inside SVG's own coordinate
+   system, whose semantics (transform-box) have historically been inconsistent across browsers. */
+.ascii-banner {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  fill: var(--text);
+}
+.ascii-row {
+  display: block;
+  width: 100%;
+  height: auto;
+  animation: ascii-wave 30s ease-in-out infinite;
+}
+/* Each row is its own transformed element, so the browser rasterizes/snaps it independently of its
+   siblings. At non-integer scaled row heights that leaves a hairline gap between rows; pulling
+   every row up by 1px hides the seam (invisible, since the overlap is the same solid color). */
+.ascii-row + .ascii-row { margin-top: -1px; }
+/* The bounce occupies only the first ~1.8s of the 30s cycle; the row then sits flat until the cycle
+   repeats. Per-row animation-delay (set inline in index.html) staggers each row's bounce a beat
+   after the one above it, so the motion reads as a wave rolling down the wordmark. */
+@keyframes ascii-wave {
+  0%, 6%, 100% { transform: translateY(0); }
+  3% { transform: translateY(-8px); }
+}
+
+/* ---- The eye ---- */
+/* A 160px mount that the 310px orb deliberately overflows on every side; with no background card
+   behind it, that reads as one perfectly round orb floating on the page rather than an icon boxed
+   into a square. The bottom margin reserves room for the overflow (and the drooping optic nerve)
+   so the tagline below never collides with it. */
+.eye-mount {
+  position: relative;
+  overflow: visible;
+  width: 160px;
+  height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 72px;
+}
+.eye-mount canvas {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 310px;
+  height: 310px;
+  pointer-events: none;
+  filter: drop-shadow(0 10px 22px rgba(255, 45, 160, 0.28));
+}
+.eye-btn-icon { font-size: 44px; } /* no-WebGL fallback glyph */
+
+/* ---- Tagline + call to action ---- */
+.product-tagline {
+  margin: 0;
+  text-align: center;
+  font-size: clamp(15px, 2.6vw, 20px);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.product-cta {
+  display: inline-block;
+  padding: 12px 22px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: #ffffff;
+  color: var(--brand);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+  cursor: pointer;
+  transition: filter 0.12s, transform 0.12s;
+}
+.product-cta:hover { filter: brightness(0.94); transform: translateY(-1px); }
+.product-cta:focus-visible { outline: 2px solid #ffffff; outline-offset: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ascii-row { animation: none; }
+}
