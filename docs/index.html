@@ -48,7 +48,12 @@
        flat glyph without it — so it stays out of the accessibility tree. -->
   <div class="eye-mount" id="eye" aria-hidden="true"></div>
 
-  <p class="product-tagline">Cyber kill chain harness coming soon</p>
+  <!-- Terminal line: prompt caret, the message, and a block cursor that blinks after it. The
+       caret and cursor are decorative punctuation around the sentence, so they're hidden from
+       assistive tech — a screen reader should read the message, not "greater-than". -->
+  <p class="terminal-line">
+    <span class="terminal-prompt" aria-hidden="true">&gt;</span><span class="terminal-text">Cyber Kill Chain Harness Coming Soon</span><span class="terminal-cursor" aria-hidden="true"></span>
+  </p>
 
   <a class="product-cta" href="https://github.com/unh0lymos3s/Pinkeye" target="_blank" rel="noopener noreferrer">
     View the GitHub repo ↗

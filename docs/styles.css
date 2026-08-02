@@ -14,6 +14,11 @@
   --text-muted: rgba(255, 255, 255, 0.72);
   --radius-sm: 12px;
 
+  /* Bullet-journal dot grid. Faint enough to read as paper texture behind the wordmark rather
+     than as content competing with it. */
+  --dot: rgba(255, 255, 255, 0.3);
+  --dot-gap: 26px;
+
   /* Monospaced everywhere for the terminal aesthetic. IBM Plex Mono is self-hosted from fonts/
      (no third-party request, and the page still renders offline); the stack falls back to the
      platform's own monospace face if the woff2 fails to load. */
@@ -46,6 +51,18 @@ html, body {
   font-family: var(--font);
   font-weight: 500;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Bullet-journal dot grid. One repeating radial-gradient rather than an image: it stays crisp at
+   any zoom or DPI, costs nothing to load, and the dots keep their size while the grid tiles to
+   whatever the viewport is. `background-attachment: fixed` anchors the grid to the viewport
+   instead of the (taller) document, so the spacing never shifts as the page grows.
+   The dot is drawn slightly smaller than its transparent stop so the edge antialiases. */
+body {
+  background-image: radial-gradient(circle, var(--dot) 1.3px, transparent 1.6px);
+  background-size: var(--dot-gap) var(--dot-gap);
+  background-position: center;
+  background-attachment: fixed;
 }
 
 ::selection { background: rgba(255, 255, 255, 0.35); color: var(--brand); }
@@ -144,16 +161,49 @@ html, body {
 }
 .eye-btn-icon { font-size: 44px; } /* no-WebGL fallback glyph */
 
-/* ---- Tagline + call to action ---- */
-.product-tagline {
+/* ---- Terminal line ---- */
+/* A shell prompt boxed in a hairline: `> message ▊`. The box is deliberately thin and unfilled
+   except for a whisper of white — enough to lift the text off the dot grid behind it without
+   becoming a solid card. */
+.terminal-line {
   margin: 0;
+  max-width: min(92vw, 640px);
+  padding: 13px 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.08);
   text-align: center;
-  font-size: clamp(15px, 2.6vw, 20px);
+  font-family: var(--font);
+  font-size: clamp(14px, 2.4vw, 19px);
   font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  line-height: 1.45;
   color: var(--text);
 }
+
+/* The prompt caret sits a shade back from the message so the eye lands on the words first. */
+.terminal-prompt {
+  color: rgba(255, 255, 255, 0.7);
+  margin-right: 0.6em;
+}
+
+/* Block cursor, sized in em so it tracks the fluid font-size and stays proportional to the
+   glyphs. steps(1) makes it snap on/off like a real terminal cursor rather than fading. */
+.terminal-cursor {
+  display: inline-block;
+  width: 0.58em;
+  height: 1.05em;
+  margin-left: 0.42em;
+  vertical-align: -0.18em;
+  background: var(--text);
+  animation: cursor-blink 1.1s steps(1, end) infinite;
+}
+@keyframes cursor-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* ---- Call to action ---- */
 
 .product-cta {
   display: inline-block;
@@ -175,4 +225,7 @@ html, body {
 
 @media (prefers-reduced-motion: reduce) {
   .ascii-row { animation: none; }
+  /* The cursor stops blinking but stays drawn — it's part of the terminal composition, not
+     decoration that can simply be dropped. */
+  .terminal-cursor { animation: none; }
 }
